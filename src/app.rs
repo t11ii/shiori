@@ -1153,7 +1153,7 @@ impl ShioriApp {
 
     fn list_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let p = theme::pal(ui);
-        let row_h = 30.0;
+        let row_h = 26.0;
         // Column dividers only as a faint hint; they light up when hovered for resizing.
         ui.visuals_mut().widgets.noninteractive.bg_stroke.color = p.border.gamma_multiply(0.45);
         let mut table = TableBuilder::new(ui)
