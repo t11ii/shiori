@@ -1,0 +1,39 @@
+[package]
+name = "shiori"
+version = "0.1.0"
+edition = "2021"
+description = "Tag-based file manager for Windows and macOS"
+
+[[bin]]
+name = "shiori"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
+egui_extras = "0.37"
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
+walkdir = "2.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
+rfd = "0.18"
+open = "5.4"
+directories = "6.0"
+trash = "5"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+# `cargo install cargo-bundle && cargo bundle --release` で macOS の .app を作れます
+[package.metadata.bundle]
+name = "Shiori"
+identifier = "dev.shiori.app"
+category = "public.app-category.productivity"
+short_description = "タグで整理するファイル管理ソフト"

@@ -1,0 +1,48 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --locked
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Bundle macOS app
+        if: runner.os == 'macOS'
+        run: |
+          cargo install cargo-bundle --locked
+          cargo bundle --release --target ${{ matrix.target }}
+          cd target/${{ matrix.target }}/release/bundle/osx
+          ditto -c -k --keepParent Shiori.app "$GITHUB_WORKSPACE/Shiori-${{ matrix.target }}.zip"
+      - name: Package Windows exe
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/shiori.exe -DestinationPath Shiori-${{ matrix.target }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Shiori-${{ matrix.target }}
+          path: Shiori-${{ matrix.target }}.zip
