@@ -15,6 +15,11 @@ pub fn is_image(ext: &str) -> bool {
     IMAGE_EXTS.contains(&ext)
 }
 
+/// Whether we can show a picture of this file's contents (decoded by us or by the OS).
+pub fn has_thumbnail(ext: &str) -> bool {
+    is_image(ext) || crate::osthumb::supports(ext)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Key {
     pub id: i64,
@@ -139,15 +144,26 @@ impl Thumbs {
 }
 
 fn decode(path: &PathBuf, size: u32) -> Option<ColorImage> {
+    let ext = crate::db::ext_of(path);
+    if is_image(&ext) {
+        if let Some(img) = decode_image(path, size) {
+            return Some(img);
+        }
+    }
+    crate::osthumb::thumbnail(path, size)
+}
+
+fn decode_image(path: &PathBuf, size: u32) -> Option<ColorImage> {
     let reader = image::ImageReader::open(path)
         .ok()?
         .with_guessed_format()
         .ok()?;
     let img = reader.decode().ok()?;
-    let thumb = img.thumbnail(size, size).to_rgba8();
-    let (w, h) = thumb.dimensions();
-    Some(ColorImage::from_rgba_unmultiplied(
-        [w as usize, h as usize],
-        thumb.as_raw(),
-    ))
+    Some(to_color_image(img.thumbnail(size, size)))
+}
+
+pub fn to_color_image(img: image::DynamicImage) -> ColorImage {
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw())
 }

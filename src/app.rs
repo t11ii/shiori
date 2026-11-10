@@ -3,7 +3,7 @@
 use crate::db::{Db, FileRow, Profile, Scope, SortKey, LABELS};
 use crate::query::Filter;
 use crate::scan::{spawn_scan, ScanMsg};
-use crate::thumbs::{is_image, Thumbs};
+use crate::thumbs::{has_thumbnail, is_image, Thumbs};
 use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense, Vec2};
 use egui_extras::{Column, TableBuilder};
 use std::collections::{HashMap, HashSet};
@@ -984,7 +984,10 @@ impl ShioriApp {
             actions.push(Action::AskTrash(ids.to_vec()));
             ui.close();
         }
-        if ui.button("Remove from Shiori (keep file on disk)").clicked() {
+        if ui
+            .button("Remove from Shiori (keep file on disk)")
+            .clicked()
+        {
             actions.push(Action::Forget(ids.to_vec()));
             ui.close();
         }
@@ -1042,7 +1045,7 @@ impl ShioriApp {
                     let f = &rows[idx];
                     row.set_selected(selected.contains(&f.id));
                     row.col(|ui| {
-                        let tex = if !f.is_dir && is_image(&f.ext) {
+                        let tex = if !f.is_dir && has_thumbnail(&f.ext) {
                             thumbs.get(f.id, &f.path, 64)
                         } else {
                             None
@@ -1179,7 +1182,7 @@ impl ShioriApp {
                             rect.min + Vec2::new(8.0, 6.0),
                             Vec2::splat(cell),
                         );
-                        let tex = if !f.is_dir && is_image(&f.ext) {
+                        let tex = if !f.is_dir && has_thumbnail(&f.ext) {
                             thumbs.get(f.id, &f.path, if cell > 128.0 { 256 } else { 128 })
                         } else {
                             None
@@ -1310,7 +1313,7 @@ impl ShioriApp {
                 ui.add_space(6.0);
                 if single {
                     let w = ui.available_width();
-                    let tex = if !first.is_dir && is_image(&first.ext) {
+                    let tex = if !first.is_dir && has_thumbnail(&first.ext) {
                         self.thumbs.get(first.id, &first.path, 512)
                     } else {
                         None
