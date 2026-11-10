@@ -8,6 +8,7 @@ mod query;
 mod scan;
 #[cfg(test)]
 mod tests;
+mod theme;
 mod thumbs;
 
 use anyhow::Context as _;
