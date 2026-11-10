@@ -47,6 +47,8 @@ struct Settings {
     thumb_size: f32,
     recursive: bool,
     theme: ThemeChoice,
+    /// Let previewed HTML pages run their scripts.
+    html_scripts: bool,
 }
 
 impl Default for Settings {
@@ -58,6 +60,7 @@ impl Default for Settings {
             thumb_size: 140.0,
             recursive: false,
             theme: ThemeChoice::System,
+            html_scripts: true,
         }
     }
 }
@@ -1510,7 +1513,7 @@ impl ShioriApp {
                     if live_html {
                         // The page itself is a native view laid over this area by `show_html`;
                         // what is painted here shows while a menu or dialog hides it.
-                        let well_h = (panel_h * 0.5).clamp(200.0, 560.0);
+                        let well_h = (w * 0.8).clamp(200.0, (panel_h * 0.55).max(200.0));
                         let (well, _) =
                             ui.allocate_exact_size(Vec2::new(w, well_h), Sense::hover());
                         ui.painter()
@@ -1526,6 +1529,32 @@ impl ShioriApp {
                         if page.width() >= 80.0 && page.height() >= 80.0 {
                             self.html_want = Some((PathBuf::from(&first.path), page));
                         }
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Live page").size(11.0).color(p.text_weak));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let on = self.settings.html_scripts;
+                                    let text = if on { "Scripts: On" } else { "Scripts: Off" };
+                                    let color = if on { p.accent_text } else { p.text_weak };
+                                    let button = egui::Button::new(
+                                        RichText::new(text).size(11.0).color(color),
+                                    )
+                                    .frame_when_inactive(false);
+                                    if ui
+                                        .add(button)
+                                        .on_hover_text(
+                                            "Presentations need their scripts to fit the panel \
+                                             and to animate.\nTurn this off for pages you do \
+                                             not trust. Either way a page cannot leave its folder.",
+                                        )
+                                        .clicked()
+                                    {
+                                        self.settings.html_scripts = !on;
+                                    }
+                                },
+                            );
+                        });
                     } else {
                         let tex = if !first.is_dir && has_thumbnail(&first.ext) {
                             self.thumbs.get(first.id, &first.path, 512)
@@ -2209,7 +2238,8 @@ impl eframe::App for ShioriApp {
         egui::Panel::right("detail")
             .resizable(true)
             .default_size(310.0)
-            .size_range(240.0..=520.0)
+            // wide enough to read a previewed page or presentation
+            .size_range(240.0..=760.0)
             .frame(theme::panel_frame(p).inner_margin(Margin::symmetric(14, 14)))
             .show(ui, |ui| {
                 self.detail_panel(ui, &mut actions);
@@ -2336,6 +2366,7 @@ impl ShioriApp {
             frame,
             want.as_ref().map(|(path, at)| (path.as_path(), *at)),
             covered,
+            self.settings.html_scripts,
         );
         // a click anywhere in the app takes the keyboard back from the page
         if ctx.input(|i| i.pointer.any_pressed()) {

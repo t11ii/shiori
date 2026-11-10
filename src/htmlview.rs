@@ -5,9 +5,11 @@
 //! * Windows: WebView2, the engine Edge uses (part of Windows 11 and of
 //!   up-to-date Windows 10). Without it the panel falls back to the file icon.
 //!
-//! The page is shown as a document rather than run as an app: JavaScript is
-//! off, nothing is stored, and the view cannot leave the folder of the file it
-//! shows, so links to websites do nothing. "Open" is the way to the browser.
+//! The page is kept on a short leash: nothing is stored, it cannot open
+//! windows, download, or ask for the camera, and it cannot leave the folder of
+//! the file it shows, so links to websites do nothing ("Open" is the way to
+//! the browser). Its scripts run only if the user allows them; presentations
+//! need them to scale their slides to the panel.
 //!
 //! A native view always draws on top of egui, so the app hides it whenever a
 //! menu or dialog could overlap it (see [`HtmlView::update`]).
@@ -119,7 +121,7 @@ mod imp {
     use std::rc::Rc;
     use wry::dpi::{PhysicalPosition, PhysicalSize};
     use wry::raw_window_handle::HasWindowHandle;
-    use wry::{NewWindowResponse, Rect, WebContext, WebView, WebViewBuilder};
+    use wry::{NewWindowResponse, PermissionResponse, Rect, WebContext, WebView, WebViewBuilder};
 
     /// What the navigation handler consults; shared with [`HtmlView`].
     #[derive(Default)]
@@ -137,6 +139,8 @@ mod imp {
         context: WebContext,
         /// Creating the view failed (no WebView2 runtime, say); don't retry every frame.
         failed: bool,
+        /// Whether the current view was built to run the page's scripts.
+        scripts: bool,
         gate: Rc<RefCell<Gate>>,
         /// File the view was last told to load, and whether that worked.
         shown: Option<(PathBuf, bool)>,
@@ -180,6 +184,7 @@ mod imp {
                 view: None,
                 context: WebContext::new(Some(data_dir)),
                 failed: false,
+                scripts: false,
                 gate: Rc::default(),
                 shown: None,
                 placed: None,
@@ -192,15 +197,20 @@ mod imp {
             !self.failed
         }
 
-        fn create<W: HasWindowHandle>(&mut self, window: &W, at: &Placement) {
+        fn create<W: HasWindowHandle>(&mut self, window: &W, at: &Placement, scripts: bool) {
             let gate = self.gate.clone();
-            let built = WebViewBuilder::new_with_web_context(&mut self.context)
+            let mut builder = WebViewBuilder::new_with_web_context(&mut self.context);
+            if !scripts {
+                builder = builder.with_javascript_disabled();
+            }
+            self.scripts = scripts;
+            let built = builder
                 .with_bounds(rect(at))
                 .with_visible(false)
                 .with_focused(false)
                 .with_incognito(true)
-                .with_javascript_disabled()
                 .with_autoplay(false)
+                .with_permission_handler(|_| PermissionResponse::Deny)
                 .with_devtools(false)
                 .with_hotkeys_zoom(false)
                 .with_back_forward_navigation_gestures(false)
@@ -242,13 +252,21 @@ mod imp {
 
         /// Call once per frame. `want` is the file to show and where; `covered`
         /// says that a menu, dialog or drag is on screen, which the page would
-        /// otherwise paint over.
+        /// otherwise paint over; `scripts` says whether pages may run theirs.
         pub fn update<W: HasWindowHandle>(
             &mut self,
             window: &W,
             want: Option<(&Path, Placement)>,
             covered: bool,
+            scripts: bool,
         ) {
+            if self.view.is_some() && self.scripts != scripts {
+                // scripts are switched when a view is built, so start over
+                self.view = None;
+                self.shown = None;
+                self.placed = None;
+                self.visible = false;
+            }
             let Some((path, at)) = want else {
                 self.hide();
                 if self.shown.take().is_some() {
@@ -260,7 +278,7 @@ mod imp {
                 return;
             };
             if self.view.is_none() && !self.failed {
-                self.create(window, &at);
+                self.create(window, &at, scripts);
             }
             let Some(view) = &self.view else { return };
 
@@ -327,6 +345,7 @@ mod imp {
             _window: &W,
             _want: Option<(&Path, Placement)>,
             _covered: bool,
+            _scripts: bool,
         ) {
         }
 
