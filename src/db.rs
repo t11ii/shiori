@@ -202,9 +202,57 @@ impl Db {
         Ok(())
     }
 
-    pub fn remove_root(&self, p: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM roots WHERE path = ?", [p])?;
-        Ok(())
+    /// Unregisters a folder and drops its files from the index.
+    ///
+    /// Files the user annotated (tags, stars, labels, comments, virtual folders)
+    /// are kept so that nothing they typed is lost. Files still covered by another
+    /// registered folder are kept too. Nothing on disk is touched.
+    /// Returns `(removed, kept)`.
+    pub fn remove_root(&self, p: &str) -> Result<(usize, usize)> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM roots WHERE path = ?", [p])?;
+        let others: Vec<String> = {
+            let mut st = tx.prepare("SELECT path FROM roots")?;
+            let v = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            v
+        };
+        // still covered by a registered parent folder: keep everything
+        if others
+            .iter()
+            .any(|o| o == p || p.starts_with(&subtree_range(o).0))
+        {
+            tx.commit()?;
+            return Ok((0, 0));
+        }
+        let (lo, hi) = subtree_range(p);
+        // the folder's own row (present when it sits inside another folder) and everything below
+        let mut scope = String::from("(path = ? OR (path >= ? AND path < ?))");
+        let mut args: Vec<rusqlite::types::Value> =
+            vec![p.to_string().into(), lo.into(), hi.into()];
+        // leave registered subfolders (and their contents) alone
+        for o in others.iter().filter(|o| o.starts_with(&subtree_range(p).0)) {
+            let (olo, ohi) = subtree_range(o);
+            scope.push_str(" AND path != ? AND NOT (path >= ? AND path < ?)");
+            args.push(o.clone().into());
+            args.push(olo.into());
+            args.push(ohi.into());
+        }
+        let removed = tx.execute(
+            &format!(
+                "DELETE FROM files WHERE {scope}
+                   AND star = 0 AND label = 0 AND comment = ''
+                   AND NOT EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = files.id)
+                   AND NOT EXISTS (SELECT 1 FROM profile_items pi WHERE pi.file_id = files.id)"
+            ),
+            params_from_iter(args.iter()),
+        )?;
+        let kept: i64 = tx.query_row(
+            &format!("SELECT COUNT(*) FROM files WHERE {scope}"),
+            params_from_iter(args.iter()),
+            |r| r.get(0),
+        )?;
+        tx.commit()?;
+        Ok((removed, kept as usize))
     }
 
     pub fn roots(&self) -> Result<Vec<String>> {
