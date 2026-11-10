@@ -3,6 +3,7 @@
 mod app;
 mod db;
 mod fonts;
+mod htmlview;
 mod osthumb;
 mod query;
 mod scan;
@@ -25,6 +26,8 @@ fn db_path() -> anyhow::Result<std::path::PathBuf> {
 fn main() -> anyhow::Result<()> {
     let path = db_path()?;
     let db = db::Db::open(&path)?;
+    // WebView2 (HTML preview on Windows) keeps its profile next to the database
+    let web_data = path.with_file_name("webview");
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Shiori")
@@ -36,7 +39,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "Shiori",
         options,
-        Box::new(move |cc| Ok(Box::new(app::ShioriApp::new(cc, db)))),
+        Box::new(move |cc| Ok(Box::new(app::ShioriApp::new(cc, db, web_data)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
