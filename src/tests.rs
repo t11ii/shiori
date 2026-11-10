@@ -201,3 +201,34 @@ fn drag_and_drop_registration_outside_roots() {
     db.add_to_profile(pid, &[id]).unwrap();
     assert_eq!(names(&db, &Scope::Profile(pid), ""), vec!["dropped.zip"]);
 }
+
+#[test]
+fn removing_a_folder_clears_its_files_but_keeps_annotated_ones() {
+    let (_d, files, db, root) = setup();
+    let pdf = id_of(&db, "report.pdf");
+    db.set_star(&[pdf], 2).unwrap();
+    // a second registered folder nested inside the first must survive
+    let photos = files.path().join("photos");
+    db.add_root(&photos).unwrap();
+
+    let (removed, kept) = db.remove_root(&root).unwrap();
+    assert_eq!(kept, 1);
+    assert_eq!(removed, 0); // only report.pdf was outside photos/, and it has a star
+    assert_eq!(db.roots().unwrap(), vec![path_key(&photos)]);
+    assert_eq!(
+        names(&db, &Scope::All, ""),
+        vec![
+            "2024",
+            "beach.jpg",
+            "mountain.png",
+            "notes.txt",
+            "photos",
+            "report.pdf"
+        ]
+    );
+
+    let (removed, kept) = db.remove_root(&path_key(&photos)).unwrap();
+    assert_eq!((removed, kept), (5, 0));
+    assert_eq!(names(&db, &Scope::All, ""), vec!["report.pdf"]);
+    assert!(files.path().join("photos").join("notes.txt").exists()); // disk untouched
+}

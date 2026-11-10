@@ -393,7 +393,15 @@ impl ShioriApp {
             }
             Action::RemoveRoot(p) => {
                 let r = self.db.remove_root(&p);
-                self.report(r);
+                if let Some((removed, kept)) = self.report(r) {
+                    let mut m = format!(
+                        "Removed folder from Shiori ({removed} items cleared from the list)"
+                    );
+                    if kept > 0 {
+                        m = format!("{m}; {kept} items with tags/stars/comments kept");
+                    }
+                    self.notify(m);
+                }
                 if matches!(&self.scope, Scope::Folder { path, .. } if path.starts_with(&p)) {
                     self.set_scope(Scope::All);
                 }
