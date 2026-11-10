@@ -70,7 +70,7 @@ cargo bundle --release       # target/release/bundle/osx/Shiori.app
 ```
 
 Windows では `cargo build --release` で `target\release\shiori.exe` ができます。
-GitHub に置くと `.github/workflows/build.yml` が Windows / macOS(Apple Silicon・Intel) 向けの配布用 zip を自動で作ります。
+GitHub に置くと `.github/workflows/build.yml` が Windows(x64) / macOS(Apple Silicon) 向けの配布用 zip を自動で作ります。
 
 ## データの保存場所
 
