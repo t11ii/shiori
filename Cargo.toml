@@ -22,6 +22,7 @@ trash = "5"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1", features = ["derive"] }
+unicode-normalization = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -30,6 +31,14 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_UI_Shell",
 ] }
+
+# HTML preview: the OS web view (WKWebView on macOS, WebView2 on Windows)
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+wry = { version = "0.57", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "WKNavigation", "WKWebView"] }
 
 [build-dependencies]
 # Embeds assets/icon/shiori.ico into shiori.exe (only when targeting Windows; see build.rs)

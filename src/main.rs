@@ -3,6 +3,7 @@
 mod app;
 mod db;
 mod fonts;
+mod htmlview;
 mod osthumb;
 mod query;
 mod scan;
@@ -36,6 +37,8 @@ fn window_icon() -> Option<eframe::egui::IconData> {
 fn main() -> anyhow::Result<()> {
     let path = db_path()?;
     let db = db::Db::open(&path)?;
+    // WebView2 (HTML preview on Windows) keeps its profile next to the database
+    let web_data = path.with_file_name("webview");
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Shiori")
         .with_inner_size([1280.0, 800.0])
@@ -51,7 +54,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "Shiori",
         options,
-        Box::new(move |cc| Ok(Box::new(app::ShioriApp::new(cc, db)))),
+        Box::new(move |cc| Ok(Box::new(app::ShioriApp::new(cc, db, web_data)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }

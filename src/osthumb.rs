@@ -1,7 +1,8 @@
 //! Thumbnails rendered by the operating system, for files we cannot decode
 //! ourselves: PDF pages, videos, Office documents, HEIC photos and so on.
 //!
-//! * macOS: Quick Look (`qlmanage -t`), the same previews Finder shows.
+//! * macOS: Quick Look (`qlmanage -t`), the same previews Finder shows. It also
+//!   renders web pages (HTML).
 //! * Windows: the Shell thumbnail cache (`IShellItemImageFactory`), the same
 //!   previews Explorer shows. Formats depend on installed thumbnail handlers.
 
@@ -19,8 +20,12 @@ const EXTS: &[&str] = &[
     "mp4", "mov", "m4v", "avi", "mkv", "wmv", "webm", "mpg", "mpeg", "3gp",
 ];
 
+/// Web pages: Quick Look renders them, Explorer has no thumbnails for them.
+const MAC_ONLY_EXTS: &[&str] = &["html", "htm"];
+
 pub fn supports(ext: &str) -> bool {
-    cfg!(any(target_os = "macos", windows)) && EXTS.contains(&ext)
+    (cfg!(any(target_os = "macos", windows)) && EXTS.contains(&ext))
+        || (cfg!(target_os = "macos") && MAC_ONLY_EXTS.contains(&ext))
 }
 
 pub fn thumbnail(path: &Path, size: u32) -> Option<ColorImage> {

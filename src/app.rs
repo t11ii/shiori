@@ -1,6 +1,7 @@
 //! The egui user interface.
 
 use crate::db::{Db, FileRow, Profile, Scope, SortKey, LABELS};
+use crate::htmlview::{self, HtmlView};
 use crate::query::Filter;
 use crate::scan::{spawn_scan, ScanMsg};
 use crate::theme;
@@ -46,6 +47,8 @@ struct Settings {
     thumb_size: f32,
     recursive: bool,
     theme: ThemeChoice,
+    /// Let previewed HTML pages run their scripts.
+    html_scripts: bool,
 }
 
 impl Default for Settings {
@@ -57,6 +60,7 @@ impl Default for Settings {
             thumb_size: 140.0,
             recursive: false,
             theme: ThemeChoice::System,
+            html_scripts: true,
         }
     }
 }
@@ -135,10 +139,14 @@ pub struct ShioriApp {
     tag_edit: Option<TagEdit>,
     confirm_trash: Option<Vec<i64>>,
     toast: Option<(String, Instant)>,
+
+    htmlview: HtmlView,
+    /// The HTML file the detail panel wants shown this frame, and where (in points).
+    html_want: Option<(PathBuf, egui::Rect)>,
 }
 
 impl ShioriApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, db: Db) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, db: Db, web_data: PathBuf) -> Self {
         crate::fonts::install(&cc.egui_ctx);
         let settings: Settings = cc
             .storage
@@ -176,6 +184,8 @@ impl ShioriApp {
             tag_edit: None,
             confirm_trash: None,
             toast: None,
+            htmlview: HtmlView::new(web_data),
+            html_want: None,
         };
         app.refresh_sidebar();
         if let Some(first) = app.roots.first().cloned() {
@@ -1489,41 +1499,95 @@ impl ShioriApp {
             };
         }
 
+        let panel_h = ui.available_height();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                let live_html = single
+                    && !first.is_dir
+                    && !first.missing
+                    && htmlview::supports(&first.ext)
+                    && self.htmlview.available();
                 if single {
                     let w = ui.available_width();
-                    let tex = if !first.is_dir && has_thumbnail(&first.ext) {
-                        self.thumbs.get(first.id, &first.path, 512)
-                    } else {
-                        None
-                    };
-                    // preview well
-                    let well_h = match &tex {
-                        Some(t) => fit(t.size_vec2(), Vec2::new(w - 16.0, 280.0)).y + 16.0,
-                        None => 150.0,
-                    };
-                    let (well, _) = ui.allocate_exact_size(Vec2::new(w, well_h), Sense::hover());
-                    ui.painter()
-                        .rect_filled(well, 10.0, if p.dark { p.bg } else { p.input });
-                    if let Some(tex) = tex {
-                        let s = fit(tex.size_vec2(), well.size() - Vec2::splat(16.0));
-                        egui::Image::new((tex.id(), s))
-                            .corner_radius(6)
-                            .paint_at(ui, egui::Rect::from_center_size(well.center(), s));
-                    } else {
+                    if live_html {
+                        // The page itself is a native view laid over this area by `show_html`;
+                        // what is painted here shows while a menu or dialog hides it.
+                        let well_h = (w * 0.8).clamp(200.0, (panel_h * 0.55).max(200.0));
+                        let (well, _) =
+                            ui.allocate_exact_size(Vec2::new(w, well_h), Sense::hover());
+                        ui.painter()
+                            .rect_filled(well, 10.0, if p.dark { p.bg } else { p.input });
                         ui.painter().text(
                             well.center(),
                             egui::Align2::CENTER_CENTER,
                             file_icon(first),
                             egui::FontId::proportional(56.0),
-                            if first.is_dir {
-                                p.accent_text
-                            } else {
-                                p.text_weak
-                            },
+                            p.text_weak,
                         );
+                        let page = well.shrink(8.0).intersect(ui.clip_rect());
+                        if page.width() >= 80.0 && page.height() >= 80.0 {
+                            self.html_want = Some((PathBuf::from(&first.path), page));
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Live page").size(11.0).color(p.text_weak));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let on = self.settings.html_scripts;
+                                    let text = if on { "Scripts: On" } else { "Scripts: Off" };
+                                    let color = if on { p.accent_text } else { p.text_weak };
+                                    let button = egui::Button::new(
+                                        RichText::new(text).size(11.0).color(color),
+                                    )
+                                    .frame_when_inactive(false);
+                                    if ui
+                                        .add(button)
+                                        .on_hover_text(
+                                            "Presentations need their scripts to fit the panel \
+                                             and to animate.\nTurn this off for pages you do \
+                                             not trust. Either way a page cannot leave its folder.",
+                                        )
+                                        .clicked()
+                                    {
+                                        self.settings.html_scripts = !on;
+                                    }
+                                },
+                            );
+                        });
+                    } else {
+                        let tex = if !first.is_dir && has_thumbnail(&first.ext) {
+                            self.thumbs.get(first.id, &first.path, 512)
+                        } else {
+                            None
+                        };
+                        // preview well
+                        let well_h = match &tex {
+                            Some(t) => fit(t.size_vec2(), Vec2::new(w - 16.0, 280.0)).y + 16.0,
+                            None => 150.0,
+                        };
+                        let (well, _) =
+                            ui.allocate_exact_size(Vec2::new(w, well_h), Sense::hover());
+                        ui.painter()
+                            .rect_filled(well, 10.0, if p.dark { p.bg } else { p.input });
+                        if let Some(tex) = tex {
+                            let s = fit(tex.size_vec2(), well.size() - Vec2::splat(16.0));
+                            egui::Image::new((tex.id(), s))
+                                .corner_radius(6)
+                                .paint_at(ui, egui::Rect::from_center_size(well.center(), s));
+                        } else {
+                            ui.painter().text(
+                                well.center(),
+                                egui::Align2::CENTER_CENTER,
+                                file_icon(first),
+                                egui::FontId::proportional(56.0),
+                                if first.is_dir {
+                                    p.accent_text
+                                } else {
+                                    p.text_weak
+                                },
+                            );
+                        }
                     }
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
@@ -2134,7 +2198,7 @@ impl ShioriApp {
 }
 
 impl eframe::App for ShioriApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_scans();
         self.thumbs.poll(&ctx);
@@ -2174,7 +2238,8 @@ impl eframe::App for ShioriApp {
         egui::Panel::right("detail")
             .resizable(true)
             .default_size(310.0)
-            .size_range(240.0..=520.0)
+            // wide enough to read a previewed page or presentation
+            .size_range(240.0..=760.0)
             .frame(theme::panel_frame(p).inner_margin(Margin::symmetric(14, 14)))
             .show(ui, |ui| {
                 self.detail_panel(ui, &mut actions);
@@ -2258,6 +2323,7 @@ impl eframe::App for ShioriApp {
         self.toast_overlay(&ctx);
 
         self.dialogs(&ctx, &mut actions);
+        self.show_html(&ctx, frame);
 
         for a in actions {
             self.apply(&ctx, a);
@@ -2266,6 +2332,46 @@ impl eframe::App for ShioriApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "shiori-settings", &self.settings);
+    }
+}
+
+impl ShioriApp {
+    /// Places the live HTML page over the area the detail panel reserved for
+    /// it this frame, or hides it. A native view draws on top of everything
+    /// egui paints, so it steps aside for menus, dialogs and drags.
+    fn show_html(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let covered = self.rename.is_some()
+            || self.profile_edit.is_some()
+            || self.tag_edit.is_some()
+            || self.confirm_trash.is_some()
+            || ctx.any_popup_open()
+            || egui::DragAndDrop::has_any_payload(ctx);
+        let ppp = ctx.pixels_per_point();
+        let window = ctx.content_rect().size() * ppp;
+        let want = self.html_want.take().map(|(path, r)| {
+            // Pages are laid out about 560 px wide and scaled down to fit a narrow
+            // panel, so they look like the page and not like its phone layout.
+            let css_width = r.width() * ctx.zoom_factor();
+            let at = htmlview::Placement {
+                x: (r.left() * ppp).round() as i32,
+                y: (r.top() * ppp).round() as i32,
+                width: (r.width() * ppp).round() as u32,
+                height: (r.height() * ppp).round() as u32,
+                window: [window.x.round() as u32, window.y.round() as u32],
+                zoom: ((css_width / 560.0).clamp(0.5, 1.0) * 50.0).round() / 50.0,
+            };
+            (path, at)
+        });
+        self.htmlview.update(
+            frame,
+            want.as_ref().map(|(path, at)| (path.as_path(), *at)),
+            covered,
+            self.settings.html_scripts,
+        );
+        // a click anywhere in the app takes the keyboard back from the page
+        if ctx.input(|i| i.pointer.any_pressed()) {
+            self.htmlview.release_focus();
+        }
     }
 }
 
