@@ -1,3 +1,5 @@
+<img src="assets/icon/shiori-512.png" width="96" alt="Shiori のアイコン">
+
 # 栞 Shiori
 
 タグ・スター・ラベル・コメントでファイルを整理する、Windows / macOS 用のファイル管理ソフトです。Rust 製。画面のメニューは英語表示です（タグ名やコメントなど中身は日本語もそのまま使えます）。
@@ -79,6 +81,8 @@ cargo bundle --release       # target/release/bundle/osx/Shiori.app
 ```
 
 Windows では `cargo build --release` で `target\release\shiori.exe` ができます。
+アプリアイコンは Windows では `build.rs` が exe に埋め込み、macOS では `cargo bundle` が `Shiori.app` に入れます。
+アイコンを直すときは `assets/icon/shiori.svg` を編集して `python3 assets/icon/build_icons.py`（cairosvg と Pillow が必要）で `.ico` / `.icns` / `.png` を作り直します。
 GitHub に置くと `.github/workflows/build.yml` が Windows(x64) / macOS(Apple Silicon) 向けの配布用 zip を自動で作ります。
 
 ## データの保存場所
@@ -102,5 +106,7 @@ GitHub に置くと `.github/workflows/build.yml` が Windows(x64) / macOS(Apple
 | `src/theme.rs` | 配色・余白・文字サイズと、共通の部品（サイドバー項目、タグのチップなど） |
 | `src/fonts.rs` | OS の日本語フォントの読み込み |
 | `src/tests.rs` | 結合テスト |
+| `assets/icon/` | アプリアイコン（元絵の `shiori.svg` と、そこから作る `.ico` / `.icns` / `.png`） |
+| `build.rs` | Windows の exe にアイコンを埋め込む |
 
 技術: [egui / eframe](https://github.com/emilk/egui)（GUI）、[rusqlite](https://github.com/rusqlite/rusqlite)（SQLite 同梱）、walkdir、image、rfd、trash
