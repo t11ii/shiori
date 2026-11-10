@@ -3,8 +3,9 @@
 use crate::db::{Db, FileRow, Profile, Scope, SortKey, LABELS};
 use crate::query::Filter;
 use crate::scan::{spawn_scan, ScanMsg};
+use crate::theme;
 use crate::thumbs::{has_thumbnail, is_image, Thumbs};
-use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense, Vec2};
+use eframe::egui::{self, Color32, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
 use egui_extras::{Column, TableBuilder};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -19,13 +20,32 @@ enum ViewMode {
     Grid,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum ThemeChoice {
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    fn preference(self) -> egui::ThemePreference {
+        match self {
+            ThemeChoice::System => egui::ThemePreference::System,
+            ThemeChoice::Light => egui::ThemePreference::Light,
+            ThemeChoice::Dark => egui::ThemePreference::Dark,
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct Settings {
     view: ViewMode,
     sort: SortKey,
     desc: bool,
     thumb_size: f32,
     recursive: bool,
+    theme: ThemeChoice,
 }
 
 impl Default for Settings {
@@ -34,8 +54,9 @@ impl Default for Settings {
             view: ViewMode::List,
             sort: SortKey::Name,
             desc: false,
-            thumb_size: 128.0,
+            thumb_size: 140.0,
             recursive: false,
+            theme: ThemeChoice::System,
         }
     }
 }
@@ -123,6 +144,8 @@ impl ShioriApp {
             .storage
             .and_then(|s| eframe::get_value(s, "shiori-settings"))
             .unwrap_or_default();
+        theme::install(&cc.egui_ctx);
+        cc.egui_ctx.set_theme(settings.theme.preference());
         let (scan_tx, scan_rx) = channel();
         let mut app = Self {
             thumbs: Thumbs::new(&cc.egui_ctx),
@@ -582,41 +605,65 @@ impl ShioriApp {
     // ------------------------------------------------------------------ panels
 
     fn sidebar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let p = theme::pal(ui);
+        ui.horizontal(|ui| {
             ui.add_space(6.0);
-            ui.heading(RichText::new("Shiori").strong());
-            ui.add_space(4.0);
-
-            let quick = [
-                ("📚 All Files", Scope::All, ""),
-                ("⭐ Starred", Scope::All, "star:1"),
-                ("🏷 Untagged", Scope::All, "is:untagged is:file"),
-                ("💬 With Comments", Scope::All, "is:comment"),
-                ("⚠ Missing Files", Scope::All, "is:missing"),
-            ];
-            for (label, scope, q) in quick {
-                let active = self.scope == scope && self.search == q;
-                if ui.selectable_label(active, label).clicked() {
-                    actions.push(Action::SetScope(scope));
-                    actions.push(Action::SetSearch(q.to_string()));
+            theme::paint_logo(ui, 20.0);
+            ui.label(
+                RichText::new("Shiori")
+                    .size(17.0)
+                    .strong()
+                    .color(p.text_strong),
+            );
+        });
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                theme::section(ui, "LIBRARY", |_| {});
+                let quick = [
+                    ("📚", "All Files", ""),
+                    ("⭐", "Starred", "star:1"),
+                    ("🏷", "Untagged", "is:untagged is:file"),
+                    ("💬", "With Comments", "is:comment"),
+                    ("⚠", "Missing Files", "is:missing"),
+                ];
+                for (icon, label, q) in quick {
+                    let active = self.scope == Scope::All && self.search == q;
+                    if theme::nav_item(ui, icon, label, None, active).clicked() {
+                        actions.push(Action::SetScope(Scope::All));
+                        actions.push(Action::SetSearch(q.to_string()));
+                    }
                 }
-            }
 
-            ui.separator();
-            egui::CollapsingHeader::new("📁 Folders").default_open(true).show(ui, |ui| {
+                theme::section(ui, "FOLDERS", |ui| {
+                    if theme::icon_button(ui, "+", "Add a folder").clicked() {
+                        actions.push(Action::AddRoot);
+                    }
+                });
+                if self.roots.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("No folders yet")
+                                .size(12.0)
+                                .color(p.text_weak),
+                        );
+                    });
+                }
                 for root in &self.roots {
                     let name = Path::new(root)
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| root.clone());
                     let active = matches!(&self.scope, Scope::Folder { path, .. } if path == root);
-                    let mut text = name.clone();
-                    if let Some(n) = self.scan_progress.get(root) {
-                        text = format!("{name}  ⟳{n}");
-                    } else if self.scanning.contains(root) {
-                        text = format!("{name}  ⟳");
-                    }
-                    let resp = ui.selectable_label(active, text).on_hover_text(root);
+                    let icon = if self.scanning.contains(root) {
+                        "⟳"
+                    } else {
+                        "🗀"
+                    };
+                    let count = self.scan_progress.get(root).map(|n| *n as i64);
+                    let resp = theme::nav_item(ui, icon, &name, count, active).on_hover_text(root);
                     if resp.clicked() {
                         actions.push(Action::SetScope(Scope::Folder {
                             path: root.clone(),
@@ -632,75 +679,78 @@ impl ShioriApp {
                             actions.push(Action::Reveal(root.clone()));
                             ui.close();
                         }
+                        ui.separator();
                         if ui.button("Remove from Shiori").clicked() {
                             actions.push(Action::RemoveRoot(root.clone()));
                             ui.close();
                         }
                     });
                 }
-                if ui.small_button("+ Add Folder").clicked() {
-                    actions.push(Action::AddRoot);
-                }
-            });
 
-            egui::CollapsingHeader::new("📂 Virtual Folders").default_open(true).show(ui, |ui| {
-                for (p, n) in &self.profiles {
-                    let active = self.scope == Scope::Profile(p.id);
-                    let text = if p.query.is_some() {
-                        format!("🔎 {}", p.name)
-                    } else {
-                        format!("{}  ({n})", p.name)
-                    };
-                    let resp = ui.selectable_label(active, text);
-                    if resp.clicked() {
-                        actions.push(Action::SetScope(Scope::Profile(p.id)));
+                theme::section(ui, "VIRTUAL FOLDERS", |ui| {
+                    if theme::icon_button(ui, "+", "New virtual folder").clicked() {
+                        actions.push(Action::EditProfile(None, false));
                     }
-                    if p.query.is_none() {
+                });
+                if self.profiles.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("Collect files from anywhere")
+                                .size(12.0)
+                                .color(p.text_weak),
+                        );
+                    });
+                }
+                for (prof, n) in &self.profiles {
+                    let active = self.scope == Scope::Profile(prof.id);
+                    let (icon, count) = if prof.query.is_some() {
+                        ("🔎", None)
+                    } else {
+                        ("🔖", Some(*n))
+                    };
+                    let resp = theme::nav_item(ui, icon, &prof.name, count, active);
+                    if resp.clicked() {
+                        actions.push(Action::SetScope(Scope::Profile(prof.id)));
+                    }
+                    if prof.query.is_none() {
                         if let Some(ids) = resp.dnd_release_payload::<Vec<i64>>() {
-                            actions.push(Action::AddToProfile(p.id, (*ids).clone()));
+                            actions.push(Action::AddToProfile(prof.id, (*ids).clone()));
                         }
                         if resp.dnd_hover_payload::<Vec<i64>>().is_some() {
-                            ui.painter().rect_stroke(
-                                resp.rect,
-                                3.0,
-                                (2.0, ui.visuals().selection.bg_fill),
-                                egui::StrokeKind::Inside,
-                            );
+                            drop_highlight(ui, &resp);
                         }
                     }
                     resp.context_menu(|ui| {
                         if ui.button("Edit…").clicked() {
-                            actions.push(Action::EditProfile(Some(p.id), false));
+                            actions.push(Action::EditProfile(Some(prof.id), false));
                             ui.close();
                         }
                         if ui.button("Delete").clicked() {
-                            actions.push(Action::DeleteProfile(p.id));
+                            actions.push(Action::DeleteProfile(prof.id));
                             ui.close();
                         }
                     });
                 }
-                ui.horizontal(|ui| {
-                    if ui.small_button("+ New").on_hover_text("A virtual folder you fill by hand").clicked() {
-                        actions.push(Action::EditProfile(None, false));
-                    }
-                    if ui
-                        .small_button("+ Smart")
-                        .on_hover_text("A virtual folder filled automatically by a search (saves the current search)")
-                        .clicked()
-                    {
-                        actions.push(Action::EditProfile(None, true));
-                    }
-                });
-            });
 
-            egui::CollapsingHeader::new("🏷 Tags").default_open(true).show(ui, |ui| {
+                theme::section(ui, "TAGS", |_| {});
                 if self.tags.is_empty() {
-                    ui.weak("Add tags from the panel on the right");
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("Add tags from the panel on the right")
+                                .size(12.0)
+                                .color(p.text_weak),
+                        );
+                    });
                 }
                 let current = Filter::parse(&self.search);
                 for (t, n) in &self.tags {
                     let active = current.tags.iter().any(|x| x.eq_ignore_ascii_case(t));
-                    let resp = ui.selectable_label(active, format!("#{t}  ({n})"));
+                    let resp = theme::nav_item(ui, "#", t, Some(*n), active);
+                    // colour swatch matching the tag's chip colour
+                    let dot = egui::pos2(resp.rect.left() + 16.0, resp.rect.center().y);
+                    ui.painter().circle_filled(dot, 4.5, theme::tag_dot(p, t));
                     if resp.clicked() {
                         let token = tag_token(t);
                         let cmd = ui.input(|i| i.modifiers.command);
@@ -708,7 +758,9 @@ impl ShioriApp {
                             if active {
                                 self.search.replace(&token, "").trim().to_string()
                             } else {
-                                format!("{} {}", self.search.trim(), token).trim().to_string()
+                                format!("{} {}", self.search.trim(), token)
+                                    .trim()
+                                    .to_string()
                             }
                         } else if active {
                             String::new()
@@ -723,6 +775,9 @@ impl ShioriApp {
                     if let Some(ids) = resp.dnd_release_payload::<Vec<i64>>() {
                         actions.push(Action::AddTag((*ids).clone(), t.clone()));
                     }
+                    if resp.dnd_hover_payload::<Vec<i64>>().is_some() {
+                        drop_highlight(ui, &resp);
+                    }
                     resp.context_menu(|ui| {
                         if ui.button("Rename…").clicked() {
                             actions.push(Action::RenameTag(t.clone()));
@@ -734,106 +789,177 @@ impl ShioriApp {
                         }
                     });
                 }
-            });
 
-            egui::CollapsingHeader::new("🎨 Labels").default_open(true).show(ui, |ui| {
+                theme::section(ui, "LABELS", |_| {});
                 ui.horizontal_wrapped(|ui| {
+                    ui.add_space(6.0);
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     for (i, (en, _, c)) in LABELS.iter().enumerate().skip(1) {
-                        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-                        ui.painter().circle_filled(rect.center(), 7.0, rgb(*c));
+                        let (rect, resp) =
+                            ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+                        let active = self.search == format!("label:{en}");
+                        if active || resp.hovered() {
+                            ui.painter().circle_filled(rect.center(), 10.0, p.hover);
+                        }
+                        ui.painter().circle_filled(rect.center(), 6.5, rgb(*c));
+                        if active {
+                            ui.painter().circle_stroke(
+                                rect.center(),
+                                9.5,
+                                Stroke::new(1.5, p.text_strong),
+                            );
+                        }
                         let resp = resp.on_hover_text(label_name(i));
                         if resp.clicked() {
                             actions.push(Action::SetScope(Scope::All));
-                            actions.push(Action::SetSearch(format!("label:{en}")));
+                            actions.push(Action::SetSearch(if active {
+                                String::new()
+                            } else {
+                                format!("label:{en}")
+                            }));
                         }
                         if let Some(ids) = resp.dnd_release_payload::<Vec<i64>>() {
                             actions.push(Action::SetLabel((*ids).clone(), i as u8));
                         }
                     }
                 });
+                ui.add_space(14.0);
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(8, 0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(
+                                "Tip: drag files onto a tag, virtual folder or label to apply it",
+                            )
+                            .size(11.0)
+                            .color(p.text_weak),
+                        );
+                    });
             });
-            ui.add_space(8.0);
-            ui.weak("Tip: drag files onto a tag, virtual folder or label to apply it");
-        });
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let p = theme::pal(ui);
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!self.back.is_empty(), egui::Button::new("◀"))
-                .on_hover_text("Back")
-                .clicked()
-            {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let back = ui
+                .add_enabled_ui(!self.back.is_empty(), |ui| {
+                    theme::icon_button(ui, "⏴", "Back")
+                })
+                .inner;
+            if back.clicked() {
                 if let Some(s) = self.back.pop() {
                     self.scope = s;
                     self.dirty = true;
                 }
             }
-            if let Scope::Folder { path, recursive } = self.scope.clone() {
-                let at_root = self.roots.contains(&path);
-                if ui
-                    .add_enabled(!at_root, egui::Button::new("⬆"))
-                    .on_hover_text("Up one folder")
-                    .clicked()
-                {
-                    if let Some(parent) = Path::new(&path).parent() {
-                        actions.push(Action::EnterDir(crate::db::path_key(parent)));
-                    }
-                }
-                let mut rec = recursive;
-                if ui.checkbox(&mut rec, "Include subfolders").changed() {
-                    self.settings.recursive = rec;
-                    self.scope = Scope::Folder {
-                        path: path.clone(),
-                        recursive: rec,
-                    };
-                    self.dirty = true;
-                }
-                self.breadcrumb(ui, &path, actions);
+            let folder = if let Scope::Folder { path, recursive } = &self.scope {
+                Some((path.clone(), *recursive))
             } else {
-                let title = match &self.scope {
-                    Scope::All => "All Files".to_string(),
-                    Scope::Profile(id) => self
-                        .profiles
-                        .iter()
-                        .find(|p| p.0.id == *id)
-                        .map(|p| format!("📂 {}", p.0.name))
-                        .unwrap_or_default(),
-                    Scope::Folder { .. } => unreachable!(),
-                };
-                ui.strong(title);
+                None
+            };
+            let at_root = folder
+                .as_ref()
+                .is_none_or(|(path, _)| self.roots.contains(path));
+            let up = ui
+                .add_enabled_ui(!at_root, |ui| theme::icon_button(ui, "⏶", "Up one folder"))
+                .inner;
+            if up.clicked() {
+                if let Some(parent) = folder
+                    .as_ref()
+                    .and_then(|(path, _)| Path::new(path).parent())
+                {
+                    actions.push(Action::EnterDir(crate::db::path_key(parent)));
+                }
+            }
+            ui.add_space(8.0);
+            ui.spacing_mut().item_spacing.x = 4.0;
+            match &folder {
+                Some((path, _)) => self.breadcrumb(ui, path, actions),
+                None => {
+                    let title = match &self.scope {
+                        Scope::Profile(id) => self
+                            .profiles
+                            .iter()
+                            .find(|p| p.0.id == *id)
+                            .map(|p| p.0.name.clone())
+                            .unwrap_or_default(),
+                        _ => "All Files".to_string(),
+                    };
+                    ui.label(
+                        RichText::new(title)
+                            .size(16.0)
+                            .strong()
+                            .color(p.text_strong),
+                    );
+                }
+            }
+            if let Some((path, recursive)) = folder {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut rec = recursive;
+                    if ui.checkbox(&mut rec, "Include subfolders").changed() {
+                        self.settings.recursive = rec;
+                        self.scope = Scope::Folder {
+                            path,
+                            recursive: rec,
+                        };
+                        self.dirty = true;
+                    }
+                });
             }
         });
-        ui.horizontal(|ui| {
-            let search_id = egui::Id::unique("shiori-search");
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .id(search_id)
-                    .hint_text("🔍 Search  e.g. trip #family star:3 ext:jpg label:red is:untagged")
-                    .desired_width(
-                        (ui.available_width()
-                            - if self.settings.view == ViewMode::Grid {
-                                420.0
-                            } else {
-                                300.0
-                            })
-                        .max(140.0),
-                    ),
-            );
-            if ui.input(|i| i.modifiers.command && i.key_pressed(Key::F)) {
-                resp.request_focus();
+        ui.add_space(6.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if theme::icon_button(ui, "⟳", "Rescan all folders").clicked() {
+                actions.push(Action::Rescan(self.roots.clone()));
             }
-            if resp.changed() {
-                self.dirty = true;
+            if self.settings.view == ViewMode::Grid {
+                ui.spacing_mut().slider_width = 80.0;
+                ui.add(
+                    egui::Slider::new(&mut self.settings.thumb_size, 64.0..=256.0)
+                        .show_value(false),
+                )
+                .on_hover_text("Thumbnail size");
             }
-            if !self.search.is_empty() && ui.small_button("×").clicked() {
-                self.search.clear();
-                self.dirty = true;
-            }
-            ui.separator();
+            // segmented view switch
+            egui::Frame::new()
+                .fill(p.control)
+                .corner_radius(7)
+                .inner_margin(Margin::same(2))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    ui.spacing_mut().button_padding = Vec2::new(8.0, 2.0);
+                    for (mode, icon, tip) in [
+                        (ViewMode::Grid, "⊞", "Thumbnail view"),
+                        (ViewMode::List, "☰", "List view"),
+                    ] {
+                        let on = self.settings.view == mode;
+                        let b = egui::Button::new(RichText::new(icon).size(14.0).color(if on {
+                            p.text_strong
+                        } else {
+                            p.text_weak
+                        }))
+                        .fill(if on { p.raised } else { Color32::TRANSPARENT })
+                        .corner_radius(5);
+                        if ui.add(b).on_hover_text(tip).clicked() {
+                            self.settings.view = mode;
+                        }
+                    }
+                });
+            ui.add_space(4.0);
             let old = (self.settings.sort, self.settings.desc);
+            if theme::icon_button(
+                ui,
+                if self.settings.desc { "↓" } else { "↑" },
+                "Ascending / descending",
+            )
+            .clicked()
+            {
+                self.settings.desc = !self.settings.desc;
+            }
             egui::ComboBox::from_id_salt("sort")
-                .width(80.0)
+                .width(96.0)
                 .selected_text(sort_name(self.settings.sort))
                 .show_ui(ui, |ui| {
                     for k in [
@@ -845,52 +971,49 @@ impl ShioriApp {
                         ui.selectable_value(&mut self.settings.sort, k, sort_name(k));
                     }
                 });
-            if ui
-                .button(if self.settings.desc { "↓" } else { "↑" })
-                .on_hover_text("Ascending / descending")
-                .clicked()
-            {
-                self.settings.desc = !self.settings.desc;
-            }
             if old != (self.settings.sort, self.settings.desc) {
                 self.dirty = true;
             }
-            ui.separator();
-            ui.selectable_value(&mut self.settings.view, ViewMode::List, "☰")
-                .on_hover_text("List view");
-            ui.selectable_value(&mut self.settings.view, ViewMode::Grid, "🖼")
-                .on_hover_text("Thumbnail view");
-            if self.settings.view == ViewMode::Grid {
-                ui.spacing_mut().slider_width = 90.0;
-                ui.add(
-                    egui::Slider::new(&mut self.settings.thumb_size, 64.0..=256.0)
-                        .show_value(false),
-                );
+            ui.add_space(8.0);
+            if !self.search.is_empty() && theme::icon_button(ui, "×", "Clear search").clicked() {
+                self.search.clear();
+                self.dirty = true;
             }
-            if ui.button("⟳").on_hover_text("Rescan all folders").clicked() {
-                actions.push(Action::Rescan(self.roots.clone()));
+            let search_id = egui::Id::unique("shiori-search");
+            let resp = ui.add_sized(
+                [ui.available_width(), 30.0],
+                egui::TextEdit::singleline(&mut self.search)
+                    .id(search_id)
+                    .hint_text("🔍  Search   trip #family star:3 ext:pdf label:red")
+                    .margin(Margin::symmetric(10, 5)),
+            );
+            if ui.input(|i| i.modifiers.command && i.key_pressed(Key::F)) {
+                resp.request_focus();
+            }
+            if resp.changed() {
+                self.dirty = true;
             }
         });
     }
 
     fn breadcrumb(&self, ui: &mut egui::Ui, path: &str, actions: &mut Vec<Action>) {
+        let p = theme::pal(ui);
         let root = self
             .roots
             .iter()
             .filter(|r| path == r.as_str() || path.starts_with(&crate::db::subtree_range(r).0))
             .max_by_key(|r| r.len());
         let Some(root) = root else {
-            ui.label(path);
+            ui.label(RichText::new(path).size(16.0).strong());
             return;
         };
         let mut cur = PathBuf::from(root);
-        let root_name = cur
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| root.clone());
-        if ui.link(root_name).clicked() {
-            actions.push(Action::EnterDir(root.clone()));
-        }
+        let mut crumbs = vec![(
+            cur.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| root.clone()),
+            root.clone(),
+        )];
         let rest = Path::new(path)
             .strip_prefix(root)
             .ok()
@@ -898,9 +1021,26 @@ impl ShioriApp {
             .unwrap_or_default();
         for comp in rest.components() {
             cur.push(comp);
-            ui.label("›");
-            if ui.link(comp.as_os_str().to_string_lossy()).clicked() {
-                actions.push(Action::EnterDir(crate::db::path_key(&cur)));
+            crumbs.push((
+                comp.as_os_str().to_string_lossy().to_string(),
+                crate::db::path_key(&cur),
+            ));
+        }
+        let last = crumbs.len() - 1;
+        for (i, (name, target)) in crumbs.into_iter().enumerate() {
+            if i > 0 {
+                ui.label(RichText::new("›").size(15.0).color(p.text_weak));
+            }
+            if i == last {
+                ui.label(RichText::new(name).size(16.0).strong().color(p.text_strong));
+            } else {
+                let r = ui.add(
+                    egui::Label::new(RichText::new(name).size(16.0).color(p.text_weak))
+                        .sense(Sense::click()),
+                );
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    actions.push(Action::EnterDir(target));
+                }
             }
         }
     }
@@ -1002,19 +1142,21 @@ impl ShioriApp {
     }
 
     fn list_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let row_h = 22.0;
-        let text_h = ui.text_style_height(&egui::TextStyle::Body);
+        let p = theme::pal(ui);
+        let row_h = 30.0;
+        // Column dividers only as a faint hint; they light up when hovered for resizing.
+        ui.visuals_mut().widgets.noninteractive.bg_stroke.color = p.border.gamma_multiply(0.45);
         let mut table = TableBuilder::new(ui)
-            .striped(true)
+            .striped(false)
             .sense(Sense::click_and_drag())
             .resizable(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(24.0))
-            .column(Column::initial(240.0).at_least(80.0).clip(true))
-            .column(Column::initial(70.0).at_least(30.0).clip(true))
-            .column(Column::initial(130.0).at_least(40.0).clip(true))
-            .column(Column::initial(70.0).at_least(40.0).clip(true))
-            .column(Column::initial(115.0).at_least(60.0).clip(true))
+            .column(Column::exact(34.0))
+            .column(Column::initial(220.0).at_least(80.0).clip(true))
+            .column(Column::initial(76.0).at_least(30.0).clip(true))
+            .column(Column::initial(140.0).at_least(40.0).clip(true))
+            .column(Column::initial(72.0).at_least(40.0).clip(true))
+            .column(Column::initial(128.0).at_least(60.0).clip(true))
             .column(Column::remainder().clip(true))
             .auto_shrink([false, false]);
         if let Some(i) = self.scroll_to.take() {
@@ -1032,18 +1174,18 @@ impl ShioriApp {
         );
         let mut menu: Option<(usize, Vec<i64>, egui::Response)> = None;
         table
-            .header(20.0, |mut h| {
+            .header(26.0, |mut h| {
                 for t in [
                     "",
-                    "Name",
-                    "Star",
-                    "Tags",
-                    "Size",
-                    "Modified",
-                    if show_path { "Location" } else { "Comment" },
+                    "NAME",
+                    "RATING",
+                    "TAGS",
+                    "SIZE",
+                    "MODIFIED",
+                    if show_path { "LOCATION" } else { "COMMENT" },
                 ] {
                     h.col(|ui| {
-                        ui.strong(t);
+                        ui.label(RichText::new(t).size(11.0).strong().color(p.text_weak));
                     });
                 }
             })
@@ -1058,53 +1200,59 @@ impl ShioriApp {
                         } else {
                             None
                         };
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
                         if let Some(tex) = tex {
-                            let size = fit(tex.size_vec2(), Vec2::splat(text_h + 4.0));
-                            ui.add(egui::Image::new((tex.id(), size)));
+                            let s = fit(tex.size_vec2(), Vec2::splat(24.0));
+                            egui::Image::new((tex.id(), s))
+                                .corner_radius(4)
+                                .paint_at(ui, egui::Rect::from_center_size(rect.center(), s));
                         } else {
-                            ui.label(file_icon(f));
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                file_icon(f),
+                                egui::FontId::proportional(15.0),
+                                if f.is_dir { p.accent_text } else { p.text_weak },
+                            );
                         }
                     });
                     row.col(|ui| {
                         if f.label > 0 {
-                            ui.label(RichText::new("●").color(rgb(LABELS[f.label as usize].2)));
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                            ui.painter().circle_filled(
+                                r.center(),
+                                4.5,
+                                rgb(LABELS[f.label as usize].2),
+                            );
                         }
-                        let mut t = RichText::new(&f.name);
+                        let mut t = RichText::new(&f.name).color(p.text_strong);
                         if f.missing {
-                            t = t.strikethrough().weak();
+                            t = t.strikethrough().color(p.text_weak);
                         }
                         ui.add(egui::Label::new(t).truncate().selectable(false));
                     });
                     row.col(|ui| {
                         if f.star > 0 {
-                            ui.label(RichText::new("★".repeat(f.star as usize)).color(STAR));
-                        }
-                    });
-                    row.col(|ui| {
-                        if !f.tags.is_empty() {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(
-                                        f.tags
-                                            .iter()
-                                            .map(|t| format!("#{t}"))
-                                            .collect::<Vec<_>>()
-                                            .join(" "),
-                                    )
-                                    .color(TAG),
-                                )
-                                .truncate()
-                                .selectable(false),
+                            ui.label(
+                                RichText::new("★".repeat(f.star as usize))
+                                    .size(12.0)
+                                    .color(p.star),
                             );
                         }
                     });
                     row.col(|ui| {
-                        if !f.is_dir {
-                            ui.label(human_size(f.size));
+                        if !f.tags.is_empty() {
+                            let rect = ui.available_rect_before_wrap();
+                            theme::paint_chip_row(ui, rect, &f.tags, 11.0, false);
                         }
                     });
                     row.col(|ui| {
-                        ui.label(fmt_time(f.mtime));
+                        if !f.is_dir {
+                            ui.label(RichText::new(human_size(f.size)).color(p.text_weak));
+                        }
+                    });
+                    row.col(|ui| {
+                        ui.label(RichText::new(fmt_time(f.mtime)).color(p.text_weak));
                     });
                     row.col(|ui| {
                         let t = if show_path {
@@ -1116,7 +1264,7 @@ impl ShioriApp {
                             f.comment.lines().next().unwrap_or("").to_string()
                         };
                         ui.add(
-                            egui::Label::new(RichText::new(t).weak())
+                            egui::Label::new(RichText::new(t).color(p.text_weak))
                                 .truncate()
                                 .selectable(false),
                         );
@@ -1143,11 +1291,16 @@ impl ShioriApp {
     }
 
     fn grid_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let cell = self.settings.thumb_size;
-        let cell_w = cell + 16.0;
-        let cell_h = cell + 44.0;
-        let width = ui.available_width();
-        let cols = ((width / cell_w).floor() as usize).max(1);
+        let p = theme::pal(ui);
+        let thumb = self.settings.thumb_size;
+        let gap = 12.0;
+        let pad = 8.0;
+        let card_w = thumb + pad * 2.0;
+        let card_h = thumb + pad + 52.0;
+        let width = ui.available_width() - gap;
+        let cols = (((width + gap) / (card_w + gap)).floor() as usize).max(1);
+        // spread leftover width evenly so the grid fills the row
+        let card_w = ((width + gap) / cols as f32 - gap).max(card_w);
         let n_rows = self.rows.len().div_ceil(cols);
         let rows = &self.rows;
         let selected = &self.selected;
@@ -1155,114 +1308,120 @@ impl ShioriApp {
         let mut menu: Option<(usize, Vec<i64>, egui::Response)> = None;
         let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
         if let Some(i) = self.scroll_to.take() {
-            let y = (i / cols) as f32 * (cell_h + ui.spacing().item_spacing.y);
-            area = area.vertical_scroll_offset(y);
+            area = area.vertical_scroll_offset((i / cols) as f32 * (card_h + gap));
         }
-        area.show_rows(ui, cell_h, n_rows, |ui, range| {
+        ui.spacing_mut().item_spacing = Vec2::splat(gap);
+        area.show_rows(ui, card_h, n_rows, |ui, range| {
             for r in range {
                 ui.horizontal(|ui| {
+                    ui.add_space(gap / 2.0);
                     for c in 0..cols {
                         let idx = r * cols + c;
                         let Some(f) = rows.get(idx) else { break };
                         let (rect, resp) = ui.allocate_exact_size(
-                            Vec2::new(cell_w, cell_h),
+                            Vec2::new(card_w, card_h),
                             Sense::click_and_drag(),
                         );
                         if !ui.is_rect_visible(rect) {
                             continue;
                         }
-                        let p = ui.painter_at(rect);
                         let sel = selected.contains(&f.id);
-                        if sel {
-                            p.rect_filled(
-                                rect.shrink(1.0),
-                                6.0,
-                                ui.visuals().selection.bg_fill.gamma_multiply(0.6),
-                            );
+                        let painter = ui.painter_at(rect.expand(2.0));
+                        let (fill, stroke) = if sel {
+                            (p.accent_soft, Stroke::new(2.0, p.accent))
                         } else if resp.hovered() {
-                            p.rect_filled(
-                                rect.shrink(1.0),
-                                6.0,
-                                ui.visuals().widgets.hovered.weak_bg_fill,
-                            );
-                        }
+                            (p.hover, Stroke::new(1.0, p.border_strong))
+                        } else {
+                            (p.raised, Stroke::new(1.0, p.border))
+                        };
+                        painter.rect(rect, 10.0, fill, stroke, egui::StrokeKind::Inside);
+
                         let img_rect = egui::Rect::from_min_size(
-                            rect.min + Vec2::new(8.0, 6.0),
-                            Vec2::splat(cell),
+                            rect.min + Vec2::new(pad, pad),
+                            Vec2::new(card_w - pad * 2.0, thumb),
                         );
                         let tex = if !f.is_dir && has_thumbnail(&f.ext) {
-                            thumbs.get(f.id, &f.path, if cell > 128.0 { 256 } else { 128 })
+                            thumbs.get(f.id, &f.path, if thumb > 128.0 { 256 } else { 128 })
                         } else {
                             None
                         };
                         if let Some(tex) = tex {
                             let s = fit(tex.size_vec2(), img_rect.size());
-                            let r = egui::Rect::from_center_size(img_rect.center(), s);
-                            p.image(
-                                tex.id(),
-                                r,
-                                egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                ),
-                                Color32::WHITE,
-                            );
+                            egui::Image::new((tex.id(), s))
+                                .corner_radius(6)
+                                .paint_at(ui, egui::Rect::from_center_size(img_rect.center(), s));
                         } else {
-                            p.text(
+                            painter.rect_filled(img_rect, 6.0, if p.dark { p.bg } else { p.panel });
+                            painter.text(
                                 img_rect.center(),
                                 egui::Align2::CENTER_CENTER,
                                 file_icon(f),
-                                egui::FontId::proportional(cell * 0.45),
-                                ui.visuals().text_color(),
+                                egui::FontId::proportional(thumb * 0.36),
+                                if f.is_dir { p.accent_text } else { p.text_weak },
                             );
+                            if !f.is_dir && !f.ext.is_empty() {
+                                painter.text(
+                                    img_rect.center_bottom() + Vec2::new(0.0, -10.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    f.ext.to_uppercase(),
+                                    egui::FontId::proportional(10.0),
+                                    p.text_weak,
+                                );
+                            }
+                        }
+                        // badges over the thumbnail
+                        if f.star > 0 {
+                            let stars = "★".repeat(f.star as usize);
+                            let g = painter.layout_no_wrap(
+                                stars,
+                                egui::FontId::proportional(10.5),
+                                p.star,
+                            );
+                            let bg = egui::Rect::from_min_size(
+                                img_rect.left_bottom() + Vec2::new(5.0, -g.size().y - 9.0),
+                                g.size() + Vec2::new(10.0, 4.0),
+                            );
+                            painter.rect_filled(
+                                bg,
+                                bg.height() / 2.0,
+                                Color32::from_black_alpha(150),
+                            );
+                            painter.galley(bg.min + Vec2::new(5.0, 2.0), g, p.star);
                         }
                         if f.label > 0 {
-                            p.circle_filled(
-                                img_rect.left_top() + Vec2::new(8.0, 8.0),
-                                6.0,
-                                rgb(LABELS[f.label as usize].2),
-                            );
+                            let c = img_rect.right_top() + Vec2::new(-10.0, 10.0);
+                            painter.circle_filled(c, 6.5, Color32::from_black_alpha(90));
+                            painter.circle_filled(c, 5.0, rgb(LABELS[f.label as usize].2));
                         }
-                        if f.star > 0 {
-                            p.text(
-                                img_rect.right_top() + Vec2::new(-2.0, 2.0),
-                                egui::Align2::RIGHT_TOP,
-                                "★".repeat(f.star as usize),
-                                egui::FontId::proportional(12.0),
-                                STAR,
-                            );
-                        }
-                        let name = egui::WidgetText::from(RichText::new(&f.name).size(12.0));
-                        let galley = name.into_galley(
+
+                        let name_color = if f.missing {
+                            p.text_weak
+                        } else {
+                            p.text_strong
+                        };
+                        let galley = egui::WidgetText::from(
+                            RichText::new(&f.name).size(12.5).color(name_color),
+                        )
+                        .into_galley(
                             ui,
                             Some(egui::TextWrapMode::Truncate),
-                            cell_w - 8.0,
+                            card_w - pad * 2.0,
                             egui::TextStyle::Body,
                         );
-                        let pos = egui::pos2(
-                            rect.center().x - galley.size().x / 2.0,
-                            img_rect.bottom() + 4.0,
+                        painter.galley(
+                            egui::pos2(
+                                rect.center().x - galley.size().x / 2.0,
+                                img_rect.bottom() + 8.0,
+                            ),
+                            galley,
+                            name_color,
                         );
-                        p.galley(pos, galley, ui.visuals().text_color());
                         if !f.tags.is_empty() {
-                            let t = f
-                                .tags
-                                .iter()
-                                .map(|t| format!("#{t}"))
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            let g = egui::WidgetText::from(RichText::new(t).size(10.0).color(TAG))
-                                .into_galley(
-                                    ui,
-                                    Some(egui::TextWrapMode::Truncate),
-                                    cell_w - 8.0,
-                                    egui::TextStyle::Small,
-                                );
-                            let pos = egui::pos2(
-                                rect.center().x - g.size().x / 2.0,
-                                img_rect.bottom() + 20.0,
+                            let chips = egui::Rect::from_min_size(
+                                egui::pos2(rect.left() + pad, img_rect.bottom() + 28.0),
+                                Vec2::new(card_w - pad * 2.0, 18.0),
                             );
-                            p.galley(pos, g, TAG);
+                            theme::paint_chip_row(ui, chips, &f.tags, 10.0, true);
                         }
                         let resp = resp.on_hover_text(&f.path);
                         handle_item_response(&resp, idx, f, selected, actions);
@@ -1288,11 +1447,26 @@ impl ShioriApp {
     }
 
     fn detail_panel(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let p = theme::pal(ui);
         let sel: Vec<FileRow> = self.selected_rows().into_iter().cloned().collect();
         if sel.is_empty() {
-            ui.add_space(20.0);
+            ui.add_space(60.0);
             ui.vertical_centered(|ui| {
-                ui.weak("Select a file to edit\nits tags, stars and comment");
+                ui.label(RichText::new("🔖").size(36.0).color(p.border_strong));
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Nothing selected")
+                        .size(14.0)
+                        .strong()
+                        .color(p.text),
+                );
+                ui.label(
+                    RichText::new(
+                        "Select a file to see its preview\nand edit its tags, rating and notes",
+                    )
+                    .size(12.0)
+                    .color(p.text_weak),
+                );
             });
             return;
         }
@@ -1318,7 +1492,6 @@ impl ShioriApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add_space(6.0);
                 if single {
                     let w = ui.available_width();
                     let tex = if !first.is_dir && has_thumbnail(&first.ext) {
@@ -1326,37 +1499,88 @@ impl ShioriApp {
                     } else {
                         None
                     };
-                    ui.vertical_centered(|ui| {
-                        if let Some(tex) = tex {
-                            let s = fit(tex.size_vec2(), Vec2::new(w, 260.0));
-                            ui.add(egui::Image::new((tex.id(), s)));
-                        } else {
-                            ui.label(RichText::new(file_icon(first)).size(64.0));
-                        }
-                    });
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new(&first.name).strong().size(15.0)).wrap(),
+                    // preview well
+                    let well_h = match &tex {
+                        Some(t) => fit(t.size_vec2(), Vec2::new(w - 16.0, 280.0)).y + 16.0,
+                        None => 150.0,
+                    };
+                    let (well, _) = ui.allocate_exact_size(Vec2::new(w, well_h), Sense::hover());
+                    ui.painter()
+                        .rect_filled(well, 10.0, if p.dark { p.bg } else { p.input });
+                    if let Some(tex) = tex {
+                        let s = fit(tex.size_vec2(), well.size() - Vec2::splat(16.0));
+                        egui::Image::new((tex.id(), s))
+                            .corner_radius(6)
+                            .paint_at(ui, egui::Rect::from_center_size(well.center(), s));
+                    } else {
+                        ui.painter().text(
+                            well.center(),
+                            egui::Align2::CENTER_CENTER,
+                            file_icon(first),
+                            egui::FontId::proportional(56.0),
+                            if first.is_dir {
+                                p.accent_text
+                            } else {
+                                p.text_weak
+                            },
                         );
-                        if ui.small_button("✏").on_hover_text("Rename (F2)").clicked() {
+                    }
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&first.name)
+                                    .strong()
+                                    .size(15.5)
+                                    .color(p.text_strong),
+                            )
+                            .wrap(),
+                        );
+                    });
+                    if first.missing {
+                        ui.label(RichText::new("⚠ Not found on disk").color(p.danger));
+                    }
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().button_padding = Vec2::new(10.0, 3.0);
+                        if theme::primary_button(ui, "Open").clicked() {
+                            if let Some(idx) = self.rows.iter().position(|r| r.id == first.id) {
+                                actions.push(Action::Open(idx));
+                            }
+                        }
+                        if ui.button(reveal_label()).clicked() {
+                            actions.push(Action::Reveal(first.path.clone()));
+                        }
+                        if ui.button("Rename…").on_hover_text("F2").clicked() {
                             actions.push(Action::StartRename(first.id));
                         }
                     });
-                    if first.missing {
-                        ui.colored_label(Color32::from_rgb(220, 120, 60), "⚠ Not found on disk");
-                    }
+                    ui.add_space(4.0);
                     egui::Grid::new("info")
                         .num_columns(2)
-                        .spacing([8.0, 2.0])
+                        .spacing([12.0, 4.0])
                         .show(ui, |ui| {
-                            ui.weak("Location");
+                            let key = |ui: &mut egui::Ui, t: &str| {
+                                ui.label(RichText::new(t).size(12.0).color(p.text_weak));
+                            };
+                            if !first.is_dir {
+                                key(ui, "Kind");
+                                ui.label(RichText::new(kind_name(first)).size(12.0));
+                                ui.end_row();
+                                key(ui, "Size");
+                                ui.label(RichText::new(human_size(first.size)).size(12.0));
+                                ui.end_row();
+                            }
+                            key(ui, "Modified");
+                            ui.label(RichText::new(fmt_time(first.mtime)).size(12.0));
+                            ui.end_row();
+                            key(ui, "Where");
                             let parent = Path::new(&first.path)
                                 .parent()
                                 .map(|p| p.to_string_lossy().to_string())
                                 .unwrap_or_default();
                             let link = egui::Label::new(
-                                RichText::new(&parent).color(ui.visuals().hyperlink_color),
+                                RichText::new(&parent).size(12.0).color(p.accent_text),
                             )
                             .truncate()
                             .sense(Sense::click());
@@ -1369,85 +1593,97 @@ impl ShioriApp {
                                 actions.push(Action::Reveal(first.path.clone()));
                             }
                             ui.end_row();
-                            if !first.is_dir {
-                                ui.weak("Size");
-                                ui.label(format!(
-                                    "{} ({} bytes)",
-                                    human_size(first.size),
-                                    first.size
-                                ));
-                                ui.end_row();
-                            }
-                            ui.weak("Modified");
-                            ui.label(fmt_time(first.mtime));
-                            ui.end_row();
                         });
-                    ui.horizontal(|ui| {
-                        if ui.button("Open").clicked() {
-                            if let Some(idx) = self.rows.iter().position(|r| r.id == first.id) {
-                                actions.push(Action::Open(idx));
-                            }
-                        }
-                        if ui.button(reveal_label()).clicked() {
-                            actions.push(Action::Reveal(first.path.clone()));
-                        }
-                    });
                 } else {
-                    ui.heading(format!("{} items selected", sel.len()));
-                    ui.weak("Changes here apply to every selected item");
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!("{} items selected", sel.len()))
+                            .size(16.0)
+                            .strong()
+                            .color(p.text_strong),
+                    );
+                    ui.label(
+                        RichText::new("Changes here apply to every selected item")
+                            .size(12.0)
+                            .color(p.text_weak),
+                    );
                 }
 
+                ui.add_space(6.0);
                 ui.separator();
-                ui.strong("Stars");
+
+                theme::caption(ui, "RATING");
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
                     let cur = if sel.iter().all(|r| r.star == first.star) {
                         first.star
                     } else {
                         0
                     };
+                    let hover_n = ui
+                        .ctx()
+                        .memory(|m| m.data.get_temp::<u8>(egui::Id::unique("star-hover")))
+                        .unwrap_or(0);
+                    let mut now_hover = 0u8;
                     for n in 1..=5u8 {
-                        let filled = n <= cur;
-                        let t = RichText::new(if filled { "★" } else { "☆" })
-                            .size(20.0)
-                            .color(if filled {
-                                STAR
-                            } else {
-                                ui.visuals().weak_text_color()
-                            });
-                        if ui.add(egui::Button::new(t).frame(false)).clicked() {
+                        let lit = if hover_n > 0 { n <= hover_n } else { n <= cur };
+                        let (rect, resp) =
+                            ui.allocate_exact_size(Vec2::new(26.0, 26.0), Sense::click());
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            if lit { "★" } else { "☆" },
+                            egui::FontId::proportional(20.0),
+                            if lit { p.star } else { p.border_strong },
+                        );
+                        if resp.hovered() {
+                            now_hover = n;
+                        }
+                        if resp
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
                             actions
                                 .push(Action::SetStar(ids.clone(), if cur == n { 0 } else { n }));
                         }
                     }
+                    ui.ctx().memory_mut(|m| {
+                        m.data
+                            .insert_temp(egui::Id::unique("star-hover"), now_hover)
+                    });
                 });
 
-                ui.strong("Label");
+                theme::caption(ui, "LABEL");
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     for (i, (_, _, c)) in LABELS.iter().enumerate() {
                         let (rect, resp) =
-                            ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+                            ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
                         let on = sel.iter().all(|r| r.label as usize == i);
+                        if resp.hovered() {
+                            ui.painter().circle_filled(rect.center(), 11.5, p.hover);
+                        }
                         if i == 0 {
                             ui.painter().circle_stroke(
                                 rect.center(),
-                                8.0,
-                                (1.5, ui.visuals().weak_text_color()),
+                                7.0,
+                                Stroke::new(1.5, p.text_weak),
                             );
                             ui.painter().line_segment(
                                 [
-                                    rect.center() + Vec2::new(-5.0, 5.0),
-                                    rect.center() + Vec2::new(5.0, -5.0),
+                                    rect.center() + Vec2::new(-4.5, 4.5),
+                                    rect.center() + Vec2::new(4.5, -4.5),
                                 ],
-                                (1.5, ui.visuals().weak_text_color()),
+                                Stroke::new(1.5, p.text_weak),
                             );
                         } else {
-                            ui.painter().circle_filled(rect.center(), 8.0, rgb(*c));
+                            ui.painter().circle_filled(rect.center(), 7.5, rgb(*c));
                         }
                         if on {
                             ui.painter().circle_stroke(
                                 rect.center(),
                                 10.5,
-                                (2.0, ui.visuals().strong_text_color()),
+                                Stroke::new(2.0, p.text_strong),
                             );
                         }
                         if resp.on_hover_text(label_name(i)).clicked() {
@@ -1456,7 +1692,7 @@ impl ShioriApp {
                     }
                 });
 
-                ui.strong("Tags");
+                theme::caption(ui, "TAGS");
                 let mut all_tags: Vec<(String, usize)> = vec![];
                 for r in &sel {
                     for t in &r.tags {
@@ -1466,29 +1702,29 @@ impl ShioriApp {
                         }
                     }
                 }
-                ui.horizontal_wrapped(|ui| {
-                    for (t, n) in &all_tags {
-                        let partial = *n < sel.len();
-                        let text = if partial {
-                            format!("#{t} ({n}) ×")
-                        } else {
-                            format!("#{t} ×")
-                        };
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(text).color(TAG))
-                                    .corner_radius(10.0),
-                            )
-                            .on_hover_text("Click to remove this tag")
-                            .clicked()
-                        {
-                            actions.push(Action::RemoveTag(ids.clone(), t.clone()));
+                if !all_tags.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
+                        for (t, n) in &all_tags {
+                            let suffix = if *n < sel.len() {
+                                format!(" ({n})  ×")
+                            } else {
+                                "  ×".to_string()
+                            };
+                            if theme::tag_chip(ui, t, &suffix, 12.0, Sense::click())
+                                .on_hover_text("Click to remove this tag")
+                                .clicked()
+                            {
+                                actions.push(Action::RemoveTag(ids.clone(), t.clone()));
+                            }
                         }
-                    }
-                });
+                    });
+                    ui.add_space(2.0);
+                }
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.tag_input)
-                        .hint_text("Add tags (Enter; comma-separated)")
+                        .hint_text("Add a tag…  (Enter, comma for several)")
+                        .margin(Margin::symmetric(8, 5))
                         .desired_width(f32::INFINITY),
                 );
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -1503,19 +1739,21 @@ impl ShioriApp {
                 }
                 // suggestions from existing tags
                 let q = self.tag_input.trim().trim_start_matches('#').to_lowercase();
-                let suggestions: Vec<&String> = self
+                let suggestions: Vec<String> = self
                     .tags
                     .iter()
-                    .map(|t| &t.0)
-                    .filter(|t| !all_tags.iter().any(|a| &a.0 == *t))
+                    .map(|t| t.0.clone())
+                    .filter(|t| !all_tags.iter().any(|a| &a.0 == t))
                     .filter(|t| q.is_empty() || t.to_lowercase().contains(&q))
                     .take(12)
                     .collect();
                 if !suggestions.is_empty() {
+                    ui.add_space(2.0);
                     ui.horizontal_wrapped(|ui| {
-                        ui.weak("Suggestions:");
+                        ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
+                        ui.label(RichText::new("Suggested").size(11.0).color(p.text_weak));
                         for t in suggestions {
-                            if ui.small_button(format!("#{t}")).clicked() {
+                            if theme::tag_chip(ui, &t, "  +", 11.0, Sense::click()).clicked() {
                                 actions.push(Action::AddTag(ids.clone(), t.clone()));
                                 self.tag_input.clear();
                             }
@@ -1523,7 +1761,7 @@ impl ShioriApp {
                     });
                 }
 
-                ui.strong("Comment");
+                theme::caption(ui, "NOTES");
                 let resp = ui.add(
                     egui::TextEdit::multiline(&mut self.comment_buf)
                         .hint_text(if single {
@@ -1531,6 +1769,7 @@ impl ShioriApp {
                         } else {
                             "Typing here replaces the comment of every selected item"
                         })
+                        .margin(Margin::same(8))
                         .desired_rows(4)
                         .desired_width(f32::INFINITY),
                 );
@@ -1555,7 +1794,7 @@ impl ShioriApp {
                     .filter(|p| p.query.is_none())
                     .collect();
                 if !manual.is_empty() {
-                    ui.strong("Virtual Folders");
+                    theme::caption(ui, "VIRTUAL FOLDERS");
                     let member: HashSet<i64> = if single {
                         self.db
                             .profiles_of(first.id)
@@ -1565,21 +1804,22 @@ impl ShioriApp {
                     } else {
                         HashSet::new()
                     };
-                    for p in manual {
+                    for prof in manual {
                         if single {
-                            let mut on = member.contains(&p.id);
-                            if ui.checkbox(&mut on, &p.name).changed() {
+                            let mut on = member.contains(&prof.id);
+                            if ui.checkbox(&mut on, &prof.name).changed() {
                                 actions.push(if on {
-                                    Action::AddToProfile(p.id, ids.clone())
+                                    Action::AddToProfile(prof.id, ids.clone())
                                 } else {
-                                    Action::RemoveFromProfile(p.id, ids.clone())
+                                    Action::RemoveFromProfile(prof.id, ids.clone())
                                 });
                             }
-                        } else if ui.button(format!("+ {}", p.name)).clicked() {
-                            actions.push(Action::AddToProfile(p.id, ids.clone()));
+                        } else if ui.button(format!("+ {}", prof.name)).clicked() {
+                            actions.push(Action::AddToProfile(prof.id, ids.clone()));
                         }
                     }
                 }
+                ui.add_space(12.0);
             });
     }
 
@@ -1594,13 +1834,19 @@ impl ShioriApp {
                 .open(&mut open)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(320.0));
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut name)
+                            .margin(Margin::symmetric(8, 5))
+                            .desired_width(340.0),
+                    );
                     r.request_focus();
-                    if (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))
-                        || ui.button("Rename").clicked()
-                    {
-                        done = true;
-                    }
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    ui.add_space(6.0);
+                    theme::button_row(ui, |ui| {
+                        if theme::primary_button(ui, "Rename").clicked() || enter {
+                            done = true;
+                        }
+                    });
                 });
             if done {
                 let r = self.db.rename(id, &name);
@@ -1622,8 +1868,14 @@ impl ShioriApp {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.label(format!("Move {} item(s) to the Trash?", ids.len()));
-                    ui.horizontal(|ui| {
-                        if ui.button("Move to Trash").clicked() {
+                    ui.label(
+                        RichText::new("Their tags, ratings and notes in Shiori are removed too.")
+                            .size(12.0)
+                            .color(theme::pal(ui).text_weak),
+                    );
+                    ui.add_space(8.0);
+                    theme::button_row(ui, |ui| {
+                        if theme::danger_button(ui, "Move to Trash").clicked() {
                             let r = self.db.trash(&ids);
                             if self.report(r).is_some() {
                                 self.notify(format!("Moved {} item(s) to the Trash", ids.len()));
@@ -1646,44 +1898,59 @@ impl ShioriApp {
         // profile editor
         if let Some(mut pe) = self.profile_edit.take() {
             let mut keep = true;
-            let title = match (pe.id, pe.smart) {
-                (None, false) => "New Virtual Folder",
-                (None, true) => "New Smart Folder",
-                (Some(_), _) => "Edit Virtual Folder",
+            let title = if pe.id.is_some() {
+                "Edit Virtual Folder"
+            } else {
+                "New Virtual Folder"
             };
+            let current_search = self.search.clone();
             egui::Window::new(title)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    egui::Grid::new("pe").num_columns(2).show(ui, |ui| {
-                        ui.label("Name");
-                        let r =
-                            ui.add(egui::TextEdit::singleline(&mut pe.name).desired_width(300.0));
-                        if pe.name.is_empty() {
-                            r.request_focus();
-                        }
-                        ui.end_row();
-                        if pe.smart {
-                            ui.label("Search");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut pe.query)
-                                    .desired_width(300.0)
-                                    .hint_text("#work star:3 ext:pdf"),
-                            );
-                            ui.end_row();
-                        }
-                    });
+                    let p = theme::pal(ui);
+                    ui.label(RichText::new("Name").size(12.0).color(p.text_weak));
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut pe.name)
+                            .margin(Margin::symmetric(8, 5))
+                            .desired_width(340.0),
+                    );
+                    if pe.name.is_empty() {
+                        r.request_focus();
+                    }
+                    ui.add_space(6.0);
+                    if ui
+                        .checkbox(&mut pe.smart, "Smart folder — filled automatically by a search")
+                        .changed()
+                        && pe.smart
+                        && pe.query.is_empty()
+                    {
+                        pe.query = current_search.clone();
+                    }
                     if pe.smart {
-                        ui.weak("Files matching this search appear automatically");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut pe.query)
+                                .margin(Margin::symmetric(8, 5))
+                                .desired_width(340.0)
+                                .hint_text("#work star:3 ext:pdf"),
+                        );
+                        ui.label(
+                            RichText::new("Files matching this search appear here automatically.")
+                                .size(12.0)
+                                .color(p.text_weak),
+                        );
                     } else {
-                        ui.weak(
-                            "Add files by dragging them here or via right-click → Add to Virtual Folder",
+                        ui.label(
+                            RichText::new("Add files by dragging them onto the folder, or right-click → Add to Virtual Folder.")
+                                .size(12.0)
+                                .color(p.text_weak),
                         );
                     }
-                    ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    theme::button_row(ui, |ui| {
                         let ok = !pe.name.trim().is_empty();
-                        if ui.add_enabled(ok, egui::Button::new("Save")).clicked() {
+                        if ui.add_enabled_ui(ok, |ui| theme::primary_button(ui, "Save")).inner.clicked() {
                             let q = pe.smart.then_some(pe.query.as_str());
                             let r = match pe.id {
                                 Some(id) => {
@@ -1721,11 +1988,17 @@ impl ShioriApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    let r = ui.text_edit_singleline(&mut te.new);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut te.new)
+                            .margin(Margin::symmetric(8, 5))
+                            .desired_width(300.0),
+                    );
                     ui.weak("Using an existing tag name merges the two tags");
-                    if (r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))
-                        || ui.button("Rename").clicked()
-                    {
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    ui.add_space(6.0);
+                    let clicked =
+                        theme::button_row(ui, |ui| theme::primary_button(ui, "Rename").clicked());
+                    if enter || clicked {
                         let res = self.db.rename_tag(&te.old, &te.new);
                         self.report(res);
                         self.dirty = true;
@@ -1740,6 +2013,89 @@ impl ShioriApp {
                 self.tag_edit = Some(te);
             }
         }
+    }
+
+    fn empty_state(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let p = theme::pal(ui);
+        ui.vertical_centered(|ui| {
+            ui.add_space((ui.available_height() / 2.0 - 90.0).max(20.0));
+            if self.roots.is_empty() {
+                ui.label(RichText::new("🗀").size(44.0).color(p.border_strong));
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Add a folder to get started")
+                        .size(17.0)
+                        .strong()
+                        .color(p.text_strong),
+                );
+                ui.label(
+                    RichText::new(
+                        "Shiori indexes it in the background. Your files stay where they are.",
+                    )
+                    .color(p.text_weak),
+                );
+                ui.add_space(12.0);
+                ui.spacing_mut().button_padding = Vec2::new(16.0, 6.0);
+                if theme::primary_button(ui, "Add Folder…").clicked() {
+                    actions.push(Action::AddRoot);
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("or drop a folder onto this window")
+                        .size(12.0)
+                        .color(p.text_weak),
+                );
+            } else if !self.scanning.is_empty() {
+                ui.add(egui::Spinner::new().size(28.0));
+                ui.add_space(8.0);
+                ui.label(RichText::new("Indexing…").size(15.0).color(p.text));
+            } else {
+                ui.label(RichText::new("🔍").size(40.0).color(p.border_strong));
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("No matching files")
+                        .size(16.0)
+                        .strong()
+                        .color(p.text_strong),
+                );
+                if !self.search.is_empty() {
+                    ui.label(RichText::new("Try a different search").color(p.text_weak));
+                    ui.add_space(8.0);
+                    if ui.button("Clear Search").clicked() {
+                        actions.push(Action::SetSearch(String::new()));
+                    }
+                }
+            }
+        });
+    }
+
+    fn toast_overlay(&mut self, ctx: &egui::Context) {
+        let Some((msg, t)) = &self.toast else { return };
+        let age = t.elapsed().as_secs_f32();
+        if age > 5.0 {
+            self.toast = None;
+            return;
+        }
+        let alpha = ((5.0 - age) / 0.4).clamp(0.0, 1.0);
+        let p = if ctx.theme() == egui::Theme::Dark {
+            &theme::DARK
+        } else {
+            &theme::LIGHT
+        };
+        egui::Area::new(egui::Id::unique("toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.set_opacity(alpha);
+                theme::card_frame(p)
+                    .shadow(ui.visuals().popup_shadow)
+                    .inner_margin(Margin::symmetric(14, 8))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(msg.as_str()).color(p.text_strong));
+                    });
+            });
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 
     fn poll_scans(&mut self) {
@@ -1796,72 +2152,110 @@ impl eframe::App for ShioriApp {
         let mut actions = Vec::new();
         self.handle_keys(&ctx, &mut actions);
 
+        let p = if ctx.theme() == egui::Theme::Dark {
+            &theme::DARK
+        } else {
+            &theme::LIGHT
+        };
+
         egui::Panel::left("sidebar")
             .resizable(true)
-            .default_size(220.0)
-            .size_range(160.0..=400.0)
+            .default_size(230.0)
+            .size_range(170.0..=400.0)
+            .frame(theme::panel_frame(p).inner_margin(Margin {
+                left: 8,
+                right: 8,
+                top: 12,
+                bottom: 8,
+            }))
             .show(ui, |ui| {
                 self.sidebar(ui, &mut actions);
             });
         egui::Panel::right("detail")
             .resizable(true)
-            .default_size(300.0)
-            .size_range(220.0..=520.0)
+            .default_size(310.0)
+            .size_range(240.0..=520.0)
+            .frame(theme::panel_frame(p).inner_margin(Margin::symmetric(14, 14)))
             .show(ui, |ui| {
                 self.detail_panel(ui, &mut actions);
             });
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let total: i64 = self.rows.iter().filter(|r| !r.is_dir).map(|r| r.size).sum();
-                ui.label(format!("{} items", self.rows.len()));
-                if self.rows.len() >= RESULT_LIMIT {
-                    ui.colored_label(
-                        Color32::from_rgb(220, 150, 50),
-                        format!("(showing first {RESULT_LIMIT})"),
-                    );
-                }
-                ui.weak(format!("{} · {:.1}ms", human_size(total), self.query_ms));
-                if !self.selected.is_empty() {
-                    ui.separator();
-                    ui.label(format!("{} selected", self.selected.len()));
-                }
-                if !self.scanning.is_empty() {
-                    ui.separator();
-                    ui.spinner();
-                    ui.label("Scanning…");
-                }
-                if let Some((msg, t)) = &self.toast {
-                    if t.elapsed() < Duration::from_secs(5) {
-                        ui.separator();
-                        ui.label(msg);
-                        ctx.request_repaint_after(Duration::from_millis(500));
+        egui::Panel::bottom("status")
+            .frame(theme::panel_frame(p).inner_margin(Margin::symmetric(12, 4)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let weak = |t: String| RichText::new(t).size(11.5).color(p.text_weak);
+                    let total: i64 = self.rows.iter().filter(|r| !r.is_dir).map(|r| r.size).sum();
+                    ui.label(weak(format!(
+                        "{} items · {}",
+                        self.rows.len(),
+                        human_size(total)
+                    )));
+                    if self.rows.len() >= RESULT_LIMIT {
+                        ui.label(
+                            RichText::new(format!("showing first {RESULT_LIMIT}"))
+                                .size(11.5)
+                                .color(p.star),
+                        );
                     }
+                    if !self.selected.is_empty() {
+                        ui.label(weak("·".into()));
+                        ui.label(
+                            RichText::new(format!("{} selected", self.selected.len()))
+                                .size(11.5)
+                                .color(p.accent_text),
+                        );
+                    }
+                    if !self.scanning.is_empty() {
+                        ui.label(weak("·".into()));
+                        ui.add(egui::Spinner::new().size(11.0));
+                        ui.label(weak("Scanning…".into()));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (icon, tip, next) = match self.settings.theme {
+                            ThemeChoice::System => {
+                                ("◑", "Appearance: follow system", ThemeChoice::Light)
+                            }
+                            ThemeChoice::Light => ("☀", "Appearance: light", ThemeChoice::Dark),
+                            ThemeChoice::Dark => ("🌙", "Appearance: dark", ThemeChoice::System),
+                        };
+                        if theme::icon_button(ui, icon, tip).clicked() {
+                            self.settings.theme = next;
+                            ctx.set_theme(next.preference());
+                        }
+                        ui.label(weak(format!("{:.1} ms", self.query_ms)));
+                    });
+                });
+            });
+        egui::Panel::top("toolbar")
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin {
+                left: 14,
+                right: 14,
+                top: 10,
+                bottom: 10,
+            }))
+            .show_separator_line(true)
+            .show(ui, |ui| {
+                self.toolbar(ui, &mut actions);
+            });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin {
+                left: 8,
+                right: 8,
+                top: 6,
+                bottom: 0,
+            }))
+            .show(ui, |ui| {
+                if self.rows.is_empty() {
+                    self.empty_state(ui, &mut actions);
+                    return;
+                }
+                match self.settings.view {
+                    ViewMode::List => self.list_view(ui, &mut actions),
+                    ViewMode::Grid => self.grid_view(ui, &mut actions),
                 }
             });
-        });
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.add_space(4.0);
-            self.toolbar(ui, &mut actions);
-            ui.add_space(2.0);
-        });
-        egui::CentralPanel::default().show(ui, |ui| {
-            if self.rows.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    if self.roots.is_empty() {
-                        ui.label("Click \"+ Add Folder\" on the left, or drop a folder onto this window to get started");
-                    } else if !self.scanning.is_empty() {
-                        ui.label("Scanning…");
-                    } else {
-                        ui.weak("No matching files");
-                    }
-                });
-                return;
-            }
-            match self.settings.view {
-                ViewMode::List => self.list_view(ui, &mut actions),
-                ViewMode::Grid => self.grid_view(ui, &mut actions),
-            }
-        });
+
+        self.toast_overlay(&ctx);
 
         self.dialogs(&ctx, &mut actions);
 
@@ -1921,8 +2315,23 @@ fn handle_item_response(
     }
 }
 
-const STAR: Color32 = Color32::from_rgb(240, 180, 30);
-const TAG: Color32 = Color32::from_rgb(90, 150, 220);
+fn drop_highlight(ui: &egui::Ui, resp: &egui::Response) {
+    let p = theme::pal(ui);
+    ui.painter().rect_stroke(
+        resp.rect,
+        6.0,
+        Stroke::new(2.0, p.accent),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn kind_name(f: &FileRow) -> String {
+    if f.ext.is_empty() {
+        "File".to_string()
+    } else {
+        format!("{} file", f.ext.to_uppercase())
+    }
+}
 
 fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
@@ -1960,7 +2369,7 @@ fn fit(size: Vec2, bounds: Vec2) -> Vec2 {
 
 fn file_icon(f: &FileRow) -> &'static str {
     if f.is_dir {
-        return "📁";
+        return "🗀";
     }
     match f.ext.as_str() {
         e if is_image(e) => "🖼",
