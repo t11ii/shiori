@@ -3,6 +3,7 @@
 mod app;
 mod db;
 mod fonts;
+mod osthumb;
 mod query;
 mod scan;
 #[cfg(test)]

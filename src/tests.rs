@@ -175,14 +175,14 @@ fn rename_folder_moves_children_and_keeps_tags() {
     let f = db.file(beach).unwrap().unwrap();
     assert_eq!(
         f.path,
-        path_key(&files.path().join("photos/2025/beach.jpg"))
+        path_key(&files.path().join("photos").join("2025").join("beach.jpg"))
     );
     assert_eq!(f.tags, vec!["夏"]);
     // a rescan must not duplicate or lose anything
     scan_root(&db.path, &root, None).unwrap();
     assert_eq!(names(&db, &Scope::All, "#夏"), vec!["beach.jpg"]);
     let in_2025 = Scope::Folder {
-        path: path_key(&files.path().join("photos/2025")),
+        path: path_key(&files.path().join("photos").join("2025")),
         recursive: false,
     };
     assert_eq!(names(&db, &in_2025, ""), vec!["beach.jpg", "mountain.png"]);
