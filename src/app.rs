@@ -1159,7 +1159,7 @@ impl ShioriApp {
         // Column dividers only as a faint hint; they light up when hovered for resizing.
         ui.visuals_mut().widgets.noninteractive.bg_stroke.color = p.border.gamma_multiply(0.45);
         let mut table = TableBuilder::new(ui)
-            .striped(false)
+            .striped(true)
             .sense(Sense::click_and_drag())
             .resizable(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
