@@ -1153,7 +1153,9 @@ impl ShioriApp {
 
     fn list_view(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let p = theme::pal(ui);
-        let row_h = 26.0;
+        let row_h = 20.0;
+        // Tight rows: the selection/hover band covers the gap, so keep it small.
+        ui.spacing_mut().item_spacing.y = 2.0;
         // Column dividers only as a faint hint; they light up when hovered for resizing.
         ui.visuals_mut().widgets.noninteractive.bg_stroke.color = p.border.gamma_multiply(0.45);
         let mut table = TableBuilder::new(ui)
@@ -1210,9 +1212,9 @@ impl ShioriApp {
                         } else {
                             None
                         };
-                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
                         if let Some(tex) = tex {
-                            let s = fit(tex.size_vec2(), Vec2::splat(24.0));
+                            let s = fit(tex.size_vec2(), Vec2::splat(18.0));
                             egui::Image::new((tex.id(), s))
                                 .corner_radius(4)
                                 .paint_at(ui, egui::Rect::from_center_size(rect.center(), s));
@@ -1221,7 +1223,7 @@ impl ShioriApp {
                                 rect.center(),
                                 egui::Align2::CENTER_CENTER,
                                 file_icon(f),
-                                egui::FontId::proportional(15.0),
+                                egui::FontId::proportional(13.0),
                                 if f.is_dir { p.accent_text } else { p.text_weak },
                             );
                         }
