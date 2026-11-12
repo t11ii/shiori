@@ -232,3 +232,30 @@ fn removing_a_folder_clears_its_files_but_keeps_annotated_ones() {
     assert_eq!(names(&db, &Scope::All, ""), vec!["report.pdf"]);
     assert!(files.path().join("photos").join("notes.txt").exists()); // disk untouched
 }
+
+#[test]
+fn searcher_answers_the_newest_request() {
+    use crate::search::{Request, Searcher};
+    let (_d, _files, db, _root) = setup();
+    let s = Searcher::new(db.path.clone(), || {});
+    for (g, q) in [(1, "beach"), (2, "mountain"), (3, "ext:pdf")] {
+        s.send(Request {
+            generation: g,
+            scope: Scope::All,
+            filter: Filter::parse(q),
+            sort: SortKey::Name,
+            desc: false,
+            limit: 100,
+        });
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let res = loop {
+        if let Some(r) = s.latest().filter(|r| r.generation == 3) {
+            break r;
+        }
+        assert!(std::time::Instant::now() < deadline, "no answer");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let names: Vec<String> = res.rows.unwrap().into_iter().map(|r| r.name).collect();
+    assert_eq!(names, vec!["report.pdf"]);
+}
