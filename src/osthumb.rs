@@ -6,7 +6,7 @@
 //! * Windows: the Shell thumbnail cache (`IShellItemImageFactory`), the same
 //!   previews Explorer shows. Formats depend on installed thumbnail handlers.
 
-use eframe::egui::ColorImage;
+use image::RgbaImage;
 use std::path::Path;
 
 /// Extensions worth asking the OS about. Everything else falls back to an icon
@@ -28,7 +28,7 @@ pub fn supports(ext: &str) -> bool {
         || (cfg!(target_os = "macos") && MAC_ONLY_EXTS.contains(&ext))
 }
 
-pub fn thumbnail(path: &Path, size: u32) -> Option<ColorImage> {
+pub fn thumbnail(path: &Path, size: u32) -> Option<RgbaImage> {
     if !supports(&crate::db::ext_of(path)) {
         return None;
     }
@@ -44,7 +44,7 @@ mod imp {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    pub fn thumbnail(path: &Path, size: u32) -> Option<ColorImage> {
+    pub fn thumbnail(path: &Path, size: u32) -> Option<RgbaImage> {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let out = std::env::temp_dir().join(format!("shiori-ql-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&out).ok()?;
@@ -53,7 +53,7 @@ mod imp {
         result
     }
 
-    fn run(path: &Path, size: u32, out: &Path) -> Option<ColorImage> {
+    fn run(path: &Path, size: u32, out: &Path) -> Option<RgbaImage> {
         let mut child = Command::new("/usr/bin/qlmanage")
             .arg("-t")
             .arg("-s")
@@ -87,7 +87,7 @@ mod imp {
             .map(|e| e.path())
             .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")))?;
         let img = image::open(png).ok()?;
-        Some(crate::thumbs::to_color_image(img.thumbnail(size, size)))
+        Some(img.thumbnail(size, size).to_rgba8())
     }
 }
 
@@ -114,7 +114,7 @@ mod imp {
         };
     }
 
-    pub fn thumbnail(path: &Path, size: u32) -> Option<ColorImage> {
+    pub fn thumbnail(path: &Path, size: u32) -> Option<RgbaImage> {
         COM.with(|_| ());
         let s = size as i32;
         unsafe {
@@ -129,7 +129,7 @@ mod imp {
             let img = bitmap_to_image(hbmp);
             let _ = DeleteObject(hbmp.into());
             let img = image::DynamicImage::ImageRgba8(img?);
-            Some(crate::thumbs::to_color_image(img.thumbnail(size, size)))
+            Some(img.thumbnail(size, size).to_rgba8())
         }
     }
 
@@ -188,7 +188,7 @@ mod imp {
 mod imp {
     use super::*;
 
-    pub fn thumbnail(_path: &Path, _size: u32) -> Option<ColorImage> {
+    pub fn thumbnail(_path: &Path, _size: u32) -> Option<RgbaImage> {
         None
     }
 }

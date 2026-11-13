@@ -232,3 +232,80 @@ fn removing_a_folder_clears_its_files_but_keeps_annotated_ones() {
     assert_eq!(names(&db, &Scope::All, ""), vec!["report.pdf"]);
     assert!(files.path().join("photos").join("notes.txt").exists()); // disk untouched
 }
+
+#[test]
+fn searcher_answers_the_newest_request() {
+    use crate::search::{Request, Searcher};
+    let (_d, _files, db, _root) = setup();
+    let s = Searcher::new(db.path.clone(), || {});
+    for (g, q) in [(1, "beach"), (2, "mountain"), (3, "ext:pdf")] {
+        s.send(Request {
+            generation: g,
+            scope: Scope::All,
+            filter: Filter::parse(q),
+            sort: SortKey::Name,
+            desc: false,
+            limit: 100,
+        });
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let res = loop {
+        if let Some(r) = s.latest().filter(|r| r.generation == 3) {
+            break r;
+        }
+        assert!(std::time::Instant::now() < deadline, "no answer");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let names: Vec<String> = res.rows.unwrap().into_iter().map(|r| r.name).collect();
+    assert_eq!(names, vec!["report.pdf"]);
+}
+
+#[test]
+fn rescan_writes_only_what_changed() {
+    let (_d, files, db, root) = setup();
+    db.conn
+        .execute_batch(
+            "CREATE TABLE writes(n INTEGER); INSERT INTO writes VALUES (0);
+             CREATE TRIGGER w1 AFTER UPDATE ON files BEGIN UPDATE writes SET n = n + 1; END;
+             CREATE TRIGGER w2 AFTER INSERT ON files BEGIN UPDATE writes SET n = n + 1; END;",
+        )
+        .unwrap();
+    let writes = || -> i64 {
+        db.conn
+            .query_row("SELECT n FROM writes", [], |r| r.get(0))
+            .unwrap()
+    };
+    let (count, removed) = scan_root(&db.path, &root, None).unwrap();
+    assert_eq!((count, removed), (6, 0)); // 2 folders + 4 files, .hidden skipped
+    assert_eq!(writes(), 0);
+    fs::write(files.path().join("report.pdf"), b"longer pdf").unwrap();
+    scan_root(&db.path, &root, None).unwrap();
+    assert_eq!(writes(), 1);
+}
+
+#[test]
+fn rescan_handles_a_deleted_folder() {
+    let (_d, files, db, root) = setup();
+    let beach = id_of(&db, "beach.jpg");
+    db.set_star(&[beach], 4).unwrap();
+    fs::remove_dir_all(files.path().join("photos/2024")).unwrap();
+    let (_count, removed) = scan_root(&db.path, &root, None).unwrap();
+    assert_eq!(removed, 2); // the 2024 folder and mountain.png
+    assert_eq!(names(&db, &Scope::All, "is:missing"), vec!["beach.jpg"]);
+    assert_eq!(
+        names(&db, &Scope::All, ""),
+        vec!["beach.jpg", "notes.txt", "photos", "report.pdf"]
+    );
+}
+
+#[test]
+fn unreadable_root_leaves_the_index_alone() {
+    let (_d, files, db, root) = setup();
+    let before = names(&db, &Scope::All, "");
+    let moved = files.path().with_extension("moved");
+    fs::rename(files.path(), &moved).unwrap();
+    assert!(scan_root(&db.path, &root, None).is_err());
+    assert_eq!(names(&db, &Scope::All, ""), before);
+    assert!(names(&db, &Scope::All, "is:missing").is_empty());
+    fs::rename(&moved, files.path()).unwrap();
+}
