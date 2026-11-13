@@ -13,6 +13,10 @@
 
 </details>
 
+## ダウンロード
+
+[Releases](https://github.com/t11ii/shiori/releases/latest) ページから Mac（Apple シリコン）用 / Windows 用の zip を入手できます。初回起動時の警告の通し方もそこに書いてあります。
+
 ## できること
 
 | 機能 | 内容 |
@@ -85,6 +89,12 @@ Windows では `cargo build --release` で `target\release\shiori.exe` ができ
 アプリアイコンは Windows では `build.rs` が exe に埋め込み、macOS では `cargo bundle` が `Shiori.app` に入れます。
 アイコンを直すときは `assets/icon/shiori.svg` を編集して `python3 assets/icon/build_icons.py`（cairosvg と Pillow が必要）で `.ico` / `.icns` / `.png` を作り直します。
 GitHub に置くと `.github/workflows/build.yml` が Windows(x64) / macOS(Apple Silicon) 向けの配布用 zip を自動で作ります。
+
+## リリースの出し方
+
+1. `Cargo.toml` の `version` を上げて main に入れます（例: `0.2.0`）。
+2. 同じ番号に `v` を付けたタグを付けて push します: `git tag v0.2.0 && git push origin v0.2.0`
+3. GitHub Actions が Windows / Mac 用の zip を作り、[Releases](https://github.com/t11ii/shiori/releases) ページに自動で載せます（説明文は `.github/release-notes.md`）。タグと `version` が違うと公開されずに止まります。
 
 ## データの保存場所
 
