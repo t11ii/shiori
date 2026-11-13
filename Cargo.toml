@@ -23,6 +23,8 @@ anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1", features = ["derive"] }
 unicode-normalization = "0.1"
+jpeg-decoder = { version = "0.3", default-features = false }
+kamadak-exif = "0.6.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -50,6 +52,8 @@ tempfile = "3"
 [profile.release]
 opt-level = 3
 lto = "thin"
+# one codegen unit lets LLVM optimise across the whole crate (slower build, faster app)
+codegen-units = 1
 strip = true
 
 # `cargo install cargo-bundle && cargo bundle --release` で macOS の .app を作れます

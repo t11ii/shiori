@@ -4,6 +4,7 @@ use crate::db::{Db, FileRow, Profile, Scope, SortKey, LABELS};
 use crate::htmlview::{self, HtmlView};
 use crate::query::Filter;
 use crate::scan::{spawn_scan, ScanMsg};
+use crate::search::{Request, Searcher};
 use crate::theme;
 use crate::thumbs::{has_thumbnail, is_image, Thumbs};
 use eframe::egui::{self, Color32, Key, Margin, Modifiers, RichText, Sense, Stroke, Vec2};
@@ -14,6 +15,8 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 const RESULT_LIMIT: usize = 50_000;
+/// How long typing must pause before the list is searched again.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum ViewMode {
@@ -123,9 +126,18 @@ pub struct ShioriApp {
     back: Vec<Scope>,
     search: String,
     rows: Vec<FileRow>,
+    /// Sum of the file sizes in `rows`, for the status bar.
+    total_size: i64,
     dirty: bool,
     sidebar_dirty: bool,
     query_ms: f64,
+    /// Runs list queries off the UI thread.
+    searcher: Searcher,
+    /// Generation of the newest query sent / of the rows on screen.
+    query_gen: u64,
+    shown_gen: u64,
+    /// When the search box last changed (queries wait for typing to pause).
+    search_edited: Option<Instant>,
 
     selected: HashSet<i64>,
     anchor: Option<usize>,
@@ -146,7 +158,12 @@ pub struct ShioriApp {
 }
 
 impl ShioriApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, db: Db, web_data: PathBuf) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        db: Db,
+        web_data: PathBuf,
+        thumb_dir: Option<PathBuf>,
+    ) -> Self {
         crate::fonts::install(&cc.egui_ctx);
         let settings: Settings = cc
             .storage
@@ -155,8 +172,10 @@ impl ShioriApp {
         theme::install(&cc.egui_ctx);
         cc.egui_ctx.set_theme(settings.theme.preference());
         let (scan_tx, scan_rx) = channel();
+        let wake_ctx = cc.egui_ctx.clone();
+        let searcher = Searcher::new(db.path.clone(), move || wake_ctx.request_repaint());
         let mut app = Self {
-            thumbs: Thumbs::new(&cc.egui_ctx),
+            thumbs: Thumbs::new(&cc.egui_ctx, thumb_dir),
             db,
             settings,
             scan_tx,
@@ -170,9 +189,14 @@ impl ShioriApp {
             back: vec![],
             search: String::new(),
             rows: vec![],
+            total_size: 0,
             dirty: true,
             sidebar_dirty: true,
             query_ms: 0.0,
+            searcher,
+            query_gen: 0,
+            shown_gen: 0,
+            search_edited: None,
             selected: HashSet::new(),
             anchor: None,
             scroll_to: None,
@@ -194,6 +218,14 @@ impl ShioriApp {
                 recursive: app.settings.recursive,
             };
         }
+        // the first list is loaded right away so the window never opens empty
+        let req = app.next_request();
+        let t = Instant::now();
+        let rows = app
+            .db
+            .search(&req.scope, &req.filter, req.sort, req.desc, req.limit);
+        app.show_rows(rows, t.elapsed().as_secs_f64() * 1000.0);
+        app.shown_gen = app.query_gen;
         // refresh the index in the background on startup
         let roots = app.roots.clone();
         app.start_scan(&cc.egui_ctx, roots);
@@ -249,8 +281,8 @@ impl ShioriApp {
         self.sidebar_dirty = false;
     }
 
-    fn requery(&mut self) {
-        let t = Instant::now();
+    /// Builds the query for the current scope/search/sort and bumps the generation.
+    fn next_request(&mut self) -> Request {
         let filter = Filter::parse(&self.search);
         // searching inside a folder looks through its subfolders too
         let scope = match &self.scope {
@@ -263,21 +295,56 @@ impl ShioriApp {
             },
             s => s.clone(),
         };
-        let r = self.db.search(
-            &scope,
-            &filter,
-            self.settings.sort,
-            self.settings.desc,
-            RESULT_LIMIT,
-        );
-        if let Some(rows) = self.report(r) {
+        self.query_gen += 1;
+        self.dirty = false;
+        self.search_edited = None;
+        Request {
+            generation: self.query_gen,
+            scope,
+            filter,
+            sort: self.settings.sort,
+            desc: self.settings.desc,
+            limit: RESULT_LIMIT,
+        }
+    }
+
+    /// Asks the search worker for a fresh list; the rows arrive in `receive_rows`.
+    fn requery(&mut self) {
+        let req = self.next_request();
+        self.searcher.send(req);
+    }
+
+    /// Takes the newest answer from the search worker, if it is still wanted.
+    fn receive_rows(&mut self) {
+        let Some(res) = self.searcher.latest() else {
+            return;
+        };
+        // an answer to an outdated query: the newer one is on its way
+        if res.generation != self.query_gen {
+            return;
+        }
+        self.shown_gen = res.generation;
+        self.show_rows(res.rows, res.ms);
+    }
+
+    fn show_rows(&mut self, rows: anyhow::Result<Vec<FileRow>>, ms: f64) {
+        if let Some(rows) = self.report(rows) {
             self.rows = rows;
         }
+        self.total_size = self.rows.iter().filter(|r| !r.is_dir).map(|r| r.size).sum();
         let present: HashSet<i64> = self.rows.iter().map(|r| r.id).collect();
         self.selected.retain(|id| present.contains(id));
         self.anchor = self.anchor.filter(|a| *a < self.rows.len());
-        self.query_ms = t.elapsed().as_secs_f64() * 1000.0;
-        self.dirty = false;
+        self.query_ms = ms;
+    }
+
+    /// Applies an edit to the rows on screen at once, so the change shows
+    /// without waiting for the list to be queried again.
+    fn patch_rows(&mut self, ids: &[i64], f: impl Fn(&mut FileRow)) {
+        let ids: HashSet<i64> = ids.iter().copied().collect();
+        for r in self.rows.iter_mut().filter(|r| ids.contains(&r.id)) {
+            f(r);
+        }
     }
 
     fn set_scope(&mut self, scope: Scope) {
@@ -397,19 +464,35 @@ impl ShioriApp {
             }
             Action::SetStar(ids, n) => {
                 let r = self.db.set_star(&ids, n);
-                self.report(r);
+                if self.report(r).is_some() {
+                    self.patch_rows(&ids, |f| f.star = n.min(5));
+                }
             }
             Action::SetLabel(ids, l) => {
                 let r = self.db.set_label(&ids, l);
-                self.report(r);
+                if self.report(r).is_some() {
+                    self.patch_rows(&ids, |f| f.label = l);
+                }
             }
             Action::AddTag(ids, t) => {
                 let r = self.db.add_tag(&ids, &t);
-                self.report(r);
+                if self.report(r).is_some() {
+                    let t = t.trim().trim_start_matches('#').to_string();
+                    if !t.is_empty() {
+                        self.patch_rows(&ids, |f| {
+                            if !f.tags.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
+                                f.tags.push(t.clone());
+                                f.tags.sort_by_key(|x| x.to_lowercase());
+                            }
+                        });
+                    }
+                }
             }
             Action::RemoveTag(ids, t) => {
                 let r = self.db.remove_tag(&ids, &t);
-                self.report(r);
+                if self.report(r).is_some() {
+                    self.patch_rows(&ids, |f| f.tags.retain(|x| !x.eq_ignore_ascii_case(&t)));
+                }
             }
             Action::SetScope(s) => {
                 changed = false;
@@ -1002,6 +1085,7 @@ impl ShioriApp {
             }
             if resp.changed() {
                 self.dirty = true;
+                self.search_edited = Some(Instant::now());
             }
         });
     }
@@ -1208,7 +1292,7 @@ impl ShioriApp {
                     row.set_selected(selected.contains(&f.id));
                     row.col(|ui| {
                         let tex = if !f.is_dir && has_thumbnail(&f.ext) {
-                            thumbs.get(f.id, &f.path, 64)
+                            thumbs.get(f, 64)
                         } else {
                             None
                         };
@@ -1353,7 +1437,7 @@ impl ShioriApp {
                             Vec2::new(card_w - pad * 2.0, thumb),
                         );
                         let tex = if !f.is_dir && has_thumbnail(&f.ext) {
-                            thumbs.get(f.id, &f.path, if thumb > 128.0 { 256 } else { 128 })
+                            thumbs.get(f, if thumb > 128.0 { 256 } else { 128 })
                         } else {
                             None
                         };
@@ -1559,7 +1643,7 @@ impl ShioriApp {
                         });
                     } else {
                         let tex = if !first.is_dir && has_thumbnail(&first.ext) {
-                            self.thumbs.get(first.id, &first.path, 512)
+                            self.thumbs.get(first, 512)
                         } else {
                             None
                         };
@@ -1848,6 +1932,8 @@ impl ShioriApp {
                     if changed {
                         let r = self.db.set_comment(&ids, &self.comment_buf);
                         if self.report(r).is_some() {
+                            let c = self.comment_buf.clone();
+                            self.patch_rows(&ids, |f| f.comment = c.clone());
                             self.dirty = true;
                         }
                     }
@@ -2209,8 +2295,18 @@ impl eframe::App for ShioriApp {
             self.refresh_sidebar();
         }
         if self.dirty {
-            self.requery();
+            // while typing, wait for a short pause before searching
+            let wait = self
+                .search_edited
+                .map(|t| SEARCH_DEBOUNCE.saturating_sub(t.elapsed()))
+                .unwrap_or_default();
+            if wait.is_zero() {
+                self.requery();
+            } else {
+                ctx.request_repaint_after(wait);
+            }
         }
+        self.receive_rows();
         if !self.scanning.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(300));
         }
@@ -2251,11 +2347,10 @@ impl eframe::App for ShioriApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let weak = |t: String| RichText::new(t).size(11.5).color(p.text_weak);
-                    let total: i64 = self.rows.iter().filter(|r| !r.is_dir).map(|r| r.size).sum();
                     ui.label(weak(format!(
                         "{} items · {}",
                         self.rows.len(),
-                        human_size(total)
+                        human_size(self.total_size)
                     )));
                     if self.rows.len() >= RESULT_LIMIT {
                         ui.label(
@@ -2289,7 +2384,11 @@ impl eframe::App for ShioriApp {
                             self.settings.theme = next;
                             ctx.set_theme(next.preference());
                         }
-                        ui.label(weak(format!("{:.1} ms", self.query_ms)));
+                        if self.dirty || self.shown_gen != self.query_gen {
+                            ui.add(egui::Spinner::new().size(11.0));
+                        } else {
+                            ui.label(weak(format!("{:.1} ms", self.query_ms)));
+                        }
                     });
                 });
             });

@@ -7,6 +7,7 @@ mod htmlview;
 mod osthumb;
 mod query;
 mod scan;
+mod search;
 #[cfg(test)]
 mod tests;
 mod theme;
@@ -21,6 +22,15 @@ fn db_path() -> anyhow::Result<std::path::PathBuf> {
     let dirs = directories::ProjectDirs::from("dev", "shiori", "Shiori")
         .context("home directory not found")?;
     Ok(dirs.data_dir().join("shiori.db"))
+}
+
+/// Where finished thumbnails are kept between runs: the OS cache folder, or
+/// next to the database when `SHIORI_DB` points somewhere else.
+fn thumb_dir(db: &std::path::Path) -> Option<std::path::PathBuf> {
+    if std::env::var_os("SHIORI_DB").is_some() {
+        return Some(db.with_file_name("thumbs"));
+    }
+    directories::ProjectDirs::from("dev", "shiori", "Shiori").map(|d| d.cache_dir().join("thumbs"))
 }
 
 /// Window icon (title bar / taskbar on Windows, Dock when run outside the .app on macOS).
@@ -39,6 +49,7 @@ fn main() -> anyhow::Result<()> {
     let db = db::Db::open(&path)?;
     // WebView2 (HTML preview on Windows) keeps its profile next to the database
     let web_data = path.with_file_name("webview");
+    let thumbs = thumb_dir(&path);
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Shiori")
         .with_inner_size([1280.0, 800.0])
@@ -54,7 +65,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "Shiori",
         options,
-        Box::new(move |cc| Ok(Box::new(app::ShioriApp::new(cc, db, web_data)))),
+        Box::new(move |cc| Ok(Box::new(app::ShioriApp::new(cc, db, web_data, thumbs)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
