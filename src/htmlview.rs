@@ -101,6 +101,29 @@ fn url_key(url: &str, windows: bool) -> String {
     }
 }
 
+/// Should a page be read as UTF-8 although it does not say so?
+///
+/// WebKit reads a page that declares no character set as Latin-1, so the
+/// many hand-written and generated pages that are UTF-8 but leave out
+/// `<meta charset="utf-8">` come out as mojibake (日本語 turns into æ—¥æœ¬èªž).
+/// Browsers guess better, which is why such a page looks fine in Chrome.
+/// True when the page has no byte-order mark, no `charset` before its body,
+/// has some non-ASCII text, and all of it is valid UTF-8.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn wants_utf8_hint(bytes: &[u8]) -> bool {
+    const BOMS: &[&[u8]] = &[b"\xEF\xBB\xBF", b"\xFE\xFF", b"\xFF\xFE"];
+    if BOMS.iter().any(|b| bytes.starts_with(b)) || bytes.is_ascii() {
+        return false;
+    }
+    let lower = bytes[..bytes.len().min(64 * 1024)].to_ascii_lowercase();
+    let find = |needle: &[u8]| lower.windows(needle.len()).position(|w| w == needle);
+    let body = find(b"<body").unwrap_or(lower.len());
+    if find(b"charset").is_some_and(|at| at < body) {
+        return false;
+    }
+    std::str::from_utf8(bytes).is_ok()
+}
+
 /// May the view go to `url` while it previews a file in the folder `base`
 /// (a [`url_key`] ending in `/`)? Only pages in that folder, so that frames
 /// and links of a saved page work but nothing is fetched from elsewhere.
@@ -158,10 +181,31 @@ mod imp {
     /// Starts loading a local page that may read the files in `dir`.
     #[cfg(target_os = "macos")]
     fn load(view: &WebView, file: &str, dir: &str) -> bool {
-        use objc2_foundation::{NSString, NSURL};
+        use objc2_foundation::{NSData, NSString, NSURL};
         use wry::WebViewExtMacOS;
+        let path = file;
         let file = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(file), false);
         let dir = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(dir), true);
+        if !path.to_ascii_lowercase().ends_with(".xhtml") {
+            if let Ok(bytes) = std::fs::read(path) {
+                if wants_utf8_hint(&bytes) {
+                    // Hand WebKit the bytes together with their encoding. With
+                    // the file's own URL as the base, relative links resolve as
+                    // before and WebKit lets the page read the files beside it.
+                    // Safety: as below.
+                    return unsafe {
+                        view.webview()
+                            .loadData_MIMEType_characterEncodingName_baseURL(
+                                &NSData::from_vec(bytes),
+                                &NSString::from_str("text/html"),
+                                &NSString::from_str("UTF-8"),
+                                &file,
+                            )
+                    }
+                    .is_some();
+                }
+            }
+        }
         // WebKit's own call for local files; it also gives the page read access
         // to `dir`, which holds its images and style sheets.
         // Safety: both URLs are valid and we are on the main thread, where the view lives.
@@ -397,6 +441,27 @@ mod tests {
         );
         // a stray percent sign is kept as it is
         assert_eq!(url_key("file:///a/100%.html", false), "file:///a/100%.html");
+    }
+
+    #[test]
+    fn utf8_hint_only_for_undeclared_utf8() {
+        let jp = "<html><head><title>栞</title></head><body>日本語</body></html>";
+        assert!(wants_utf8_hint(jp.as_bytes()));
+        // declared, in any of the usual spellings
+        assert!(!wants_utf8_hint(
+            "<meta charset=\"utf-8\"><p>日本語".as_bytes()
+        ));
+        assert!(!wants_utf8_hint(
+            "<META http-equiv=\"Content-Type\" content=\"text/html; CHARSET=Shift_JIS\"><p>日本語"
+                .as_bytes()
+        ));
+        // "charset" in the text of the page does not count
+        assert!(wants_utf8_hint("<body>charset 日本語".as_bytes()));
+        // with a byte-order mark the engine already knows
+        assert!(!wants_utf8_hint("\u{feff}<p>日本語".as_bytes()));
+        // nothing to get wrong in plain ASCII, and Shift_JIS is not UTF-8
+        assert!(!wants_utf8_hint(b"<p>hello</p>"));
+        assert!(!wants_utf8_hint(b"<p>\x93\xfa\x96\x7b</p>"));
     }
 
     #[test]
