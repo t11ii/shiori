@@ -75,6 +75,7 @@ enum Action {
     Open(usize),
     EnterDir(String),
     Reveal(String),
+    CopyPath(String),
     StartRename(i64),
     AskTrash(Vec<i64>),
     Forget(Vec<i64>),
@@ -429,6 +430,11 @@ impl ShioriApp {
             Action::Reveal(path) => {
                 changed = false;
                 reveal(&path);
+            }
+            Action::CopyPath(path) => {
+                changed = false;
+                ctx.copy_text(path.clone());
+                self.notify(format!("Copied path: {path}"));
             }
             Action::StartRename(id) => {
                 changed = false;
@@ -1157,7 +1163,7 @@ impl ShioriApp {
             ui.close();
         }
         if ui.button("Copy Path").clicked() {
-            ui.ctx().copy_text(row.path.clone());
+            actions.push(Action::CopyPath(row.path.clone()));
             ui.close();
         }
         ui.separator();
@@ -1736,11 +1742,14 @@ impl ShioriApp {
                             .sense(Sense::click());
                             if ui
                                 .add(link)
-                                .on_hover_text(&first.path)
+                                .on_hover_text(format!(
+                                    "{}\nClick to copy the full path",
+                                    first.path
+                                ))
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .clicked()
                             {
-                                actions.push(Action::Reveal(first.path.clone()));
+                                actions.push(Action::CopyPath(first.path.clone()));
                             }
                             ui.end_row();
                         });
