@@ -37,6 +37,8 @@ windows = { version = "0.62", features = [
 # HTML preview: the OS web view (WKWebView on macOS, WebView2 on Windows)
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 wry = { version = "0.57", default-features = false }
+# Drag files out of the window into other apps (Finder / Explorer, editors, mail…)
+drag = "2.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString", "NSURL"] }
