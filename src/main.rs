@@ -2,6 +2,7 @@
 
 mod app;
 mod db;
+mod dragout;
 mod fonts;
 mod htmlview;
 mod osthumb;

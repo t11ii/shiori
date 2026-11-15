@@ -1,6 +1,7 @@
 //! The egui user interface.
 
 use crate::db::{Db, FileRow, Profile, Scope, SortKey, LABELS};
+use crate::dragout::DragOut;
 use crate::htmlview::{self, HtmlView};
 use crate::query::Filter;
 use crate::scan::{spawn_scan, ScanMsg};
@@ -153,6 +154,7 @@ pub struct ShioriApp {
     toast: Option<(String, Instant)>,
 
     htmlview: HtmlView,
+    dragout: DragOut,
     /// The HTML file the detail panel wants shown this frame, and where (in points).
     html_want: Option<(PathBuf, egui::Rect)>,
 }
@@ -209,6 +211,7 @@ impl ShioriApp {
             confirm_trash: None,
             toast: None,
             htmlview: HtmlView::new(web_data),
+            dragout: DragOut::default(),
             html_want: None,
         };
         app.refresh_sidebar();
@@ -675,7 +678,7 @@ impl ShioriApp {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        if dropped.is_empty() {
+        if dropped.is_empty() || self.dragout.is_own_drop(&dropped) {
             return;
         }
         let mut ids = vec![];
@@ -2424,11 +2427,16 @@ impl eframe::App for ShioriApp {
         self.toast_overlay(&ctx);
 
         self.dialogs(&ctx, &mut actions);
+        self.drag_out(&ctx, frame);
         self.show_html(&ctx, frame);
 
         for a in actions {
             self.apply(&ctx, a);
         }
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.dragout.fix_input(ctx, raw_input);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -2437,6 +2445,24 @@ impl eframe::App for ShioriApp {
 }
 
 impl ShioriApp {
+    /// A file drag that leaves the window becomes an OS drag, so the files can
+    /// be dropped into Finder / Explorer or any other app.
+    fn drag_out(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if !self.dragout.should_start(ctx) {
+            return;
+        }
+        let Some(ids) = egui::DragAndDrop::payload::<Vec<i64>>(ctx) else {
+            return;
+        };
+        let paths: Vec<PathBuf> = self
+            .rows
+            .iter()
+            .filter(|r| ids.contains(&r.id))
+            .map(|r| PathBuf::from(&r.path))
+            .collect();
+        self.dragout.start(ctx, frame, paths);
+    }
+
     /// Places the live HTML page over the area the detail panel reserved for
     /// it this frame, or hides it. A native view draws on top of everything
     /// egui paints, so it steps aside for menus, dialogs and drags.
@@ -2499,7 +2525,8 @@ fn handle_item_response(
         };
         resp.dnd_set_drag_payload(ids);
     }
-    if resp.dragged() {
+    // no ghost once the drag has been handed to the OS (it draws its own)
+    if resp.dragged() && egui::DragAndDrop::has_payload_of_type::<Vec<i64>>(&resp.ctx) {
         if let Some(pos) = resp.ctx.pointer_interact_pos() {
             let n = if selected.contains(&f.id) {
                 selected.len()
