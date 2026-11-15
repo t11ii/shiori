@@ -138,6 +138,11 @@ pub struct ShioriApp {
     shown_gen: u64,
     /// When the search box last changed (queries wait for typing to pause).
     search_edited: Option<Instant>,
+    /// Where the search box was drawn last frame (for the IME candidate window).
+    search_rect: Option<egui::Rect>,
+    /// Whether we switched the OS input method on ourselves so that typing on
+    /// the file list can start a Japanese (or other IME) search right away.
+    list_ime_on: bool,
 
     selected: HashSet<i64>,
     anchor: Option<usize>,
@@ -197,6 +202,8 @@ impl ShioriApp {
             query_gen: 0,
             shown_gen: 0,
             search_edited: None,
+            search_rect: None,
+            list_ime_on: false,
             selected: HashSet::new(),
             anchor: None,
             scroll_to: None,
@@ -623,6 +630,10 @@ impl ShioriApp {
                 for (n, k) in stars.iter().enumerate() {
                     if i.consume_key(Modifiers::NONE, *k) {
                         actions.push(Action::SetStar(ids.clone(), n as u8));
+                        // the digit was a shortcut, so it must not start a search
+                        let digit = n.to_string();
+                        i.events
+                            .retain(|e| !matches!(e, egui::Event::Text(t) if *t == digit));
                     }
                 }
                 if i.consume_key(Modifiers::NONE, Key::Delete)
@@ -665,6 +676,71 @@ impl ShioriApp {
                 }
             }
         });
+    }
+
+    /// Nothing is being edited and no menu or dialog is open, so keys belong
+    /// to the file list.
+    fn list_has_keyboard(&self, ctx: &egui::Context) -> bool {
+        !ctx.egui_wants_keyboard_input()
+            && self.rename.is_none()
+            && self.profile_edit.is_none()
+            && self.tag_edit.is_none()
+            && self.confirm_trash.is_none()
+            && !egui::Popup::is_any_open(ctx)
+    }
+
+    /// Typing on the file list moves into the search box: the first character
+    /// (or the first IME composition) focuses it before it is drawn this frame,
+    /// so the box itself takes the text and filters as usual.
+    fn type_to_search(&mut self, ctx: &egui::Context) {
+        if !self.list_has_keyboard(ctx) {
+            return;
+        }
+        let typed = ctx.input(|i| {
+            i.events.iter().any(|e| match e {
+                // a lone space (also the IME's full-width one) starts nothing
+                egui::Event::Text(text)
+                | egui::Event::Ime(egui::ImeEvent::Preedit { text, .. })
+                | egui::Event::Ime(egui::ImeEvent::Commit(text)) => !text.trim().is_empty(),
+                _ => false,
+            })
+        });
+        if !typed {
+            return;
+        }
+        let id = search_id();
+        // add to what is already there rather than replacing it
+        let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        let end = egui::text::CCursor::new(self.search.chars().count());
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(end)));
+        state.store(ctx, id);
+        ctx.memory_mut(|m| m.request_focus(id));
+    }
+
+    /// Keeps the OS input method switched on while the file list has the
+    /// keyboard. egui only enables it while a text box is focused, so without
+    /// this the first key typed in Japanese mode would arrive as a bare Latin
+    /// letter. Turned on through a viewport command (not egui's own IME output)
+    /// so that focusing the search box does not cancel the composition.
+    fn keep_list_ime(&mut self, ctx: &egui::Context) {
+        if ctx.output(|o| o.ime.is_some()) {
+            // a text box owns the IME this frame; when it lets go, egui turns
+            // the IME off, so it has to be switched on again afterwards
+            self.list_ime_on = false;
+            return;
+        }
+        let want = self.list_has_keyboard(ctx);
+        if want && !self.list_ime_on {
+            ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(true));
+            if let Some(r) = self.search_rect {
+                ctx.send_viewport_cmd(egui::ViewportCommand::IMERect(r));
+            }
+        } else if !want && self.list_ime_on {
+            ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(false));
+        }
+        self.list_ime_on = want;
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -1072,7 +1148,7 @@ impl ShioriApp {
                 self.search.clear();
                 self.dirty = true;
             }
-            let search_id = egui::Id::unique("shiori-search");
+            let search_id = search_id();
             let resp = ui.add_sized(
                 [ui.available_width(), 30.0],
                 egui::TextEdit::singleline(&mut self.search)
@@ -1080,6 +1156,7 @@ impl ShioriApp {
                     .hint_text("🔍  Search   trip #family star:3 ext:pdf label:red")
                     .margin(Margin::symmetric(10, 5)),
             );
+            self.search_rect = Some(resp.rect);
             if ui.input(|i| i.modifiers.command && i.key_pressed(Key::F)) {
                 resp.request_focus();
             }
@@ -2313,6 +2390,7 @@ impl eframe::App for ShioriApp {
 
         let mut actions = Vec::new();
         self.handle_keys(&ctx, &mut actions);
+        self.type_to_search(&ctx);
 
         let p = if ctx.theme() == egui::Theme::Dark {
             &theme::DARK
@@ -2425,6 +2503,7 @@ impl eframe::App for ShioriApp {
 
         self.dialogs(&ctx, &mut actions);
         self.show_html(&ctx, frame);
+        self.keep_list_ime(&ctx);
 
         for a in actions {
             self.apply(&ctx, a);
@@ -2556,6 +2635,11 @@ fn tag_token(t: &str) -> String {
     } else {
         format!("#{t}")
     }
+}
+
+/// The toolbar's search box.
+fn search_id() -> egui::Id {
+    egui::Id::unique("shiori-search")
 }
 
 fn sort_name(k: SortKey) -> &'static str {
