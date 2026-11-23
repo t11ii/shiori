@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     let web_data = path.with_file_name("webview");
     let thumbs = thumb_dir(&path);
     let mut viewport = eframe::egui::ViewportBuilder::default()
-        .with_title("Shiori")
+        .with_title(concat!("Shiori ", env!("CARGO_PKG_VERSION")))
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([720.0, 420.0])
         .with_drag_and_drop(true);
