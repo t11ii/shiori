@@ -1,6 +1,6 @@
 //! Background folder indexing.
 
-use crate::db::{open_conn, path_key, subtree_range, upsert_meta};
+use crate::db::{ensure_folder_name_order_index, open_conn, path_key, subtree_range, upsert_meta};
 use anyhow::{Context as _, Result};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -179,7 +179,7 @@ pub fn spawn_scan(
     ctx: eframe::egui::Context,
 ) {
     std::thread::spawn(move || {
-        for root in roots {
+        for (i, root) in roots.into_iter().enumerate() {
             let msg = match scan_root(&db_path, &root, Some(&tx)) {
                 Ok((count, removed)) => ScanMsg::Done {
                     root: root.clone(),
@@ -191,6 +191,14 @@ pub fn spawn_scan(
                     message: format!("{e:#}"),
                 },
             };
+            if i == 0 {
+                // Prepare the sort index once the first folder's scan has finished.
+                // If another writer is active, the next scan can try again.
+                let _ = open_conn(&db_path).and_then(|conn| {
+                    conn.busy_timeout(std::time::Duration::ZERO)?;
+                    ensure_folder_name_order_index(&conn)
+                });
+            }
             let _ = tx.send(msg);
             ctx.request_repaint();
         }

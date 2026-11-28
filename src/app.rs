@@ -16,6 +16,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 const RESULT_LIMIT: usize = 50_000;
+const STARTUP_RESULT_LIMIT: usize = 128;
 /// How long typing must pause before the list is searched again.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -130,8 +131,14 @@ pub struct ShioriApp {
     rows: Vec<FileRow>,
     /// Sum of the file sizes in `rows`, for the status bar.
     total_size: i64,
+    /// Extra rows from the initial query are still to be loaded.
+    rows_partial: bool,
+    /// The first egui frame must finish before startup maintenance begins.
+    startup_frame: Option<u64>,
     dirty: bool,
     sidebar_dirty: bool,
+    sidebar_gen: u64,
+    sidebar_shown_gen: u64,
     query_ms: f64,
     /// Runs list queries off the UI thread.
     searcher: Searcher,
@@ -198,8 +205,12 @@ impl ShioriApp {
             search: String::new(),
             rows: vec![],
             total_size: 0,
+            rows_partial: false,
+            startup_frame: Some(cc.egui_ctx.cumulative_frame_nr()),
             dirty: true,
             sidebar_dirty: true,
+            sidebar_gen: 0,
+            sidebar_shown_gen: 0,
             query_ms: 0.0,
             searcher,
             query_gen: 0,
@@ -222,24 +233,27 @@ impl ShioriApp {
             dragout: DragOut::default(),
             html_want: None,
         };
-        app.refresh_sidebar();
+        app.roots = app.db.roots().unwrap_or_default();
         if let Some(first) = app.roots.first().cloned() {
             app.scope = Scope::Folder {
                 path: first,
                 recursive: app.settings.recursive,
             };
         }
-        // the first list is loaded right away so the window never opens empty
-        let req = app.next_request();
+        // One extra row tells us whether another query is needed after painting.
+        let req = app.next_request(STARTUP_RESULT_LIMIT + 1);
         let t = Instant::now();
         let rows = app
             .db
-            .search(&req.scope, &req.filter, req.sort, req.desc, req.limit);
-        app.show_rows(rows, t.elapsed().as_secs_f64() * 1000.0);
+            .search(&req.scope, &req.filter, req.sort, req.desc, req.limit)
+            .map(|mut rows| {
+                app.rows_partial = rows.len() > STARTUP_RESULT_LIMIT;
+                rows.truncate(STARTUP_RESULT_LIMIT);
+                rows
+            });
+        let loaded = app.show_rows(rows, t.elapsed().as_secs_f64() * 1000.0);
         app.shown_gen = app.query_gen;
-        // refresh the index in the background on startup
-        let roots = app.roots.clone();
-        app.start_scan(&cc.egui_ctx, roots);
+        app.dirty = !loaded || app.rows_partial;
         app
     }
 
@@ -276,24 +290,47 @@ impl ShioriApp {
 
     fn refresh_sidebar(&mut self) {
         self.roots = self.db.roots().unwrap_or_default();
-        let profiles = self.db.profiles().unwrap_or_default();
-        self.profiles = profiles
+        self.profiles = self
+            .db
+            .profiles()
+            .unwrap_or_default()
             .into_iter()
-            .map(|p| {
-                let n = if p.query.is_some() {
-                    -1
-                } else {
-                    self.db.profile_count(p.id).unwrap_or(0)
-                };
-                (p, n)
-            })
+            .map(|profile| (profile, -1))
             .collect();
-        self.tags = self.db.tag_counts().unwrap_or_default();
+        self.tags = self
+            .db
+            .tag_names()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|name| (name, -1))
+            .collect();
+        self.sidebar_gen += 1;
+        self.searcher.send_sidebar(self.sidebar_gen);
         self.sidebar_dirty = false;
     }
 
+    fn receive_sidebar(&mut self) {
+        if let Some(res) = self
+            .searcher
+            .latest_sidebar()
+            .filter(|res| res.generation == self.sidebar_gen)
+        {
+            for (profile, count) in &mut self.profiles {
+                if let Some(&n) = res.profile_counts.get(&profile.id) {
+                    *count = n;
+                }
+            }
+            for (name, count) in &mut self.tags {
+                if let Some(&n) = res.tag_counts.get(name) {
+                    *count = n;
+                }
+            }
+            self.sidebar_shown_gen = res.generation;
+        }
+    }
+
     /// Builds the query for the current scope/search/sort and bumps the generation.
-    fn next_request(&mut self) -> Request {
+    fn next_request(&mut self, limit: usize) -> Request {
         let filter = Filter::parse(&self.search);
         // searching inside a folder looks through its subfolders too
         let scope = match &self.scope {
@@ -315,13 +352,13 @@ impl ShioriApp {
             filter,
             sort: self.settings.sort,
             desc: self.settings.desc,
-            limit: RESULT_LIMIT,
+            limit,
         }
     }
 
     /// Asks the search worker for a fresh list; the rows arrive in `receive_rows`.
     fn requery(&mut self) {
-        let req = self.next_request();
+        let req = self.next_request(RESULT_LIMIT);
         self.searcher.send(req);
     }
 
@@ -335,18 +372,29 @@ impl ShioriApp {
             return;
         }
         self.shown_gen = res.generation;
-        self.show_rows(res.rows, res.ms);
+        if self.show_rows(res.rows, res.ms) {
+            self.rows_partial = false;
+        }
     }
 
-    fn show_rows(&mut self, rows: anyhow::Result<Vec<FileRow>>, ms: f64) {
-        if let Some(rows) = self.report(rows) {
-            self.rows = rows;
-        }
-        self.total_size = self.rows.iter().filter(|r| !r.is_dir).map(|r| r.size).sum();
-        let present: HashSet<i64> = self.rows.iter().map(|r| r.id).collect();
-        self.selected.retain(|id| present.contains(id));
-        self.anchor = self.anchor.filter(|a| *a < self.rows.len());
+    fn show_rows(&mut self, rows: anyhow::Result<Vec<FileRow>>, ms: f64) -> bool {
         self.query_ms = ms;
+        let Some(rows) = self.report(rows) else {
+            return false;
+        };
+        let new_position = |index: usize| {
+            let id = self.rows.get(index)?.id;
+            rows.iter().position(|row| row.id == id)
+        };
+        self.anchor = self.anchor.and_then(new_position);
+        self.scroll_to = self.scroll_to.and_then(new_position);
+        if !self.selected.is_empty() {
+            let present: HashSet<i64> = rows.iter().map(|r| r.id).collect();
+            self.selected.retain(|id| present.contains(id));
+        }
+        self.total_size = rows.iter().filter(|r| !r.is_dir).map(|r| r.size).sum();
+        self.rows = rows;
+        true
     }
 
     /// Applies an edit to the rows on screen at once, so the change shows
@@ -590,7 +638,15 @@ impl ShioriApp {
             }
             Action::SelectAll => {
                 changed = false;
-                self.selected = self.rows.iter().map(|r| r.id).collect();
+                if self.rows_partial {
+                    if !self.dirty && self.shown_gen == self.query_gen {
+                        self.dirty = true;
+                        ctx.request_repaint();
+                    }
+                    self.notify("Select All is available once the full list is loaded.");
+                } else {
+                    self.selected = self.rows.iter().map(|r| r.id).collect();
+                }
             }
         }
         if changed {
@@ -870,7 +926,7 @@ impl ShioriApp {
                         actions.push(Action::EditProfile(None, false));
                     }
                 });
-                if self.profiles.is_empty() {
+                if self.profiles.is_empty() && self.sidebar_shown_gen > 0 {
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
                         ui.label(
@@ -885,7 +941,7 @@ impl ShioriApp {
                     let (icon, count) = if prof.query.is_some() {
                         ("🔎", None)
                     } else {
-                        ("🔖", Some(*n))
+                        ("🔖", (*n >= 0).then_some(*n))
                     };
                     let resp = theme::nav_item(ui, icon, &prof.name, count, active);
                     if resp.clicked() {
@@ -912,7 +968,7 @@ impl ShioriApp {
                 }
 
                 theme::section(ui, "TAGS", |_| {});
-                if self.tags.is_empty() {
+                if self.tags.is_empty() && self.sidebar_shown_gen > 0 {
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
                         ui.label(
@@ -925,7 +981,7 @@ impl ShioriApp {
                 let current = Filter::parse(&self.search);
                 for (t, n) in &self.tags {
                     let active = current.tags.iter().any(|x| x.eq_ignore_ascii_case(t));
-                    let resp = theme::nav_item(ui, "#", t, Some(*n), active);
+                    let resp = theme::nav_item(ui, "#", t, (*n >= 0).then_some(*n), active);
                     // colour swatch matching the tag's chip colour
                     let dot = egui::pos2(resp.rect.left() + 16.0, resp.rect.center().y);
                     ui.painter().circle_filled(dot, 4.5, theme::tag_dot(p, t));
@@ -1412,7 +1468,9 @@ impl ShioriApp {
                         } else {
                             p.text_strong
                         };
-                        let mut name = RichText::new(&f.name).color(color);
+                        let mut name = RichText::new(&f.name)
+                            .text_style(crate::fonts::file_name_style())
+                            .color(color);
                         if f.missing && !cfg!(windows) {
                             name = name.strikethrough();
                         }
@@ -1601,7 +1659,7 @@ impl ShioriApp {
                             ui,
                             Some(egui::TextWrapMode::Truncate),
                             card_w - pad * 2.0,
-                            egui::TextStyle::Body,
+                            crate::fonts::file_name_style(),
                         );
                         painter.galley(
                             egui::pos2(
@@ -1779,6 +1837,7 @@ impl ShioriApp {
                         ui.add(
                             egui::Label::new(
                                 RichText::new(&first.name)
+                                    .text_style(crate::fonts::file_name_style())
                                     .strong()
                                     .size(15.5)
                                     .color(p.text_strong),
@@ -2090,6 +2149,7 @@ impl ShioriApp {
                 .show(ctx, |ui| {
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut name)
+                            .font(crate::fonts::file_name_style())
                             .margin(Margin::symmetric(8, 5))
                             .desired_width(340.0),
                     );
@@ -2299,7 +2359,7 @@ impl ShioriApp {
                         .size(12.0)
                         .color(p.text_weak),
                 );
-            } else if !self.scanning.is_empty() {
+            } else if !self.scanning.is_empty() || self.startup_frame.is_some() {
                 ui.add(egui::Spinner::new().size(28.0));
                 ui.add_space(8.0);
                 ui.label(RichText::new("Indexing…").size(15.0).color(p.text));
@@ -2390,13 +2450,14 @@ impl ShioriApp {
 impl eframe::App for ShioriApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let first_frame = self.startup_frame == Some(ctx.cumulative_frame_nr());
+        if first_frame {
+            ctx.request_repaint();
+        }
         self.poll_scans();
         self.thumbs.poll(&ctx);
         self.handle_dropped_files(&ctx);
-        if self.sidebar_dirty {
-            self.refresh_sidebar();
-        }
-        if self.dirty {
+        if self.dirty && !first_frame {
             // while typing, wait for a short pause before searching
             let wait = self
                 .search_edited
@@ -2408,7 +2469,15 @@ impl eframe::App for ShioriApp {
                 ctx.request_repaint_after(wait);
             }
         }
+        if self.sidebar_dirty && !first_frame {
+            self.refresh_sidebar();
+        }
         self.receive_rows();
+        self.receive_sidebar();
+        if !first_frame && self.startup_frame.take().is_some() {
+            self.start_scan(&ctx, self.roots.clone());
+            self.thumbs.start_disk_cache_trim();
+        }
         if !self.scanning.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(300));
         }
@@ -2450,11 +2519,16 @@ impl eframe::App for ShioriApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let weak = |t: String| RichText::new(t).size(11.5).color(p.text_weak);
-                    ui.label(weak(format!(
-                        "{} items · {}",
-                        self.rows.len(),
-                        human_size(self.total_size)
-                    )));
+                    let summary = if self.rows_partial {
+                        format!("{} items loaded", self.rows.len())
+                    } else {
+                        format!(
+                            "{} items · {}",
+                            self.rows.len(),
+                            human_size(self.total_size)
+                        )
+                    };
+                    ui.label(weak(summary));
                     if self.rows.len() >= RESULT_LIMIT {
                         ui.label(
                             RichText::new(format!("showing first {RESULT_LIMIT}"))
@@ -2789,5 +2863,112 @@ fn reveal(path: &str) {
             p.parent().unwrap_or(p)
         };
         let _ = open::that_detached(dir);
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_identity_updates_before_counts_arrive() {
+        let data = tempfile::tempdir().unwrap();
+        let db = Db::open_in(data.path()).unwrap();
+        let old = db.create_profile("Old", None).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = ShioriApp::new(&cc, db, data.path().join("webview"), None);
+
+        app.refresh_sidebar();
+        assert_eq!(app.profiles.len(), 1);
+        assert_eq!(app.profiles[0].0.name, "Old");
+        app.apply(&ctx, Action::DeleteProfile(old));
+        let replacement = app.db.create_profile("Replacement", None).unwrap();
+        app.refresh_sidebar();
+        assert_eq!(app.profiles.len(), 1);
+        assert_eq!(app.profiles[0].0.id, replacement);
+        assert_eq!(app.profiles[0].0.name, "Replacement");
+    }
+
+    #[test]
+    fn initial_frame_shows_a_prefix_and_defers_startup_work() {
+        let data = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let db = Db::open_in(data.path()).unwrap();
+        db.add_root(folder.path()).unwrap();
+        for i in 0..160 {
+            std::fs::write(folder.path().join(format!("file{i:03}.txt")), "").unwrap();
+        }
+        let root = crate::db::path_key(folder.path());
+        crate::scan::scan_root(&db.path, &root, None).unwrap();
+        let tagged = db
+            .search(&Scope::All, &Filter::default(), SortKey::Name, false, 1)
+            .unwrap()[0]
+            .id;
+        db.add_tag(&[tagged], "launch").unwrap();
+
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = ShioriApp::new(&cc, db, data.path().join("webview"), None);
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut redraw = |app: &mut ShioriApp| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut frame))
+                .drop_without_applying_deltas();
+        };
+        redraw(&mut app);
+
+        assert_eq!(app.rows.len(), 128);
+        assert_eq!(app.rows[0].name, "file000.txt");
+        assert_eq!(app.rows[127].name, "file127.txt");
+        assert!(app.tags.is_empty());
+        assert!(app.scanning.is_empty());
+        let has_order_index = |app: &ShioriApp| {
+            app.db
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                     WHERE type = 'index' AND name = 'idx_files_folder_name_order')",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap()
+        };
+        assert!(!has_order_index(&app));
+
+        let selected = app.rows[4].id;
+        app.selected.insert(selected);
+        app.anchor = Some(4);
+        app.apply(&ctx, Action::SelectAll);
+        assert_eq!(app.selected, HashSet::from([selected]));
+
+        let initial_query = app.query_gen;
+        redraw(&mut app);
+        assert!(app.query_gen > initial_query);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            redraw(&mut app);
+            if app.rows.len() == 160
+                && app.scanning.is_empty()
+                && app.shown_gen == app.query_gen
+                && app.sidebar_shown_gen == app.sidebar_gen
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "startup work did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.tags, vec![("launch".to_owned(), 1)]);
+        assert!(has_order_index(&app));
+        assert_eq!(app.selected, HashSet::from([selected]));
+        assert_eq!(app.rows[app.anchor.unwrap()].id, selected);
+        app.apply(&ctx, Action::SelectAll);
+        assert_eq!(app.selected.len(), 160);
     }
 }

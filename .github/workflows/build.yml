@@ -41,7 +41,10 @@ jobs:
       - name: Package Windows exe
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path target/${{ matrix.target }}/release/shiori.exe -DestinationPath Shiori-${{ matrix.target }}.zip
+        run: >
+          Compress-Archive
+          -Path target/${{ matrix.target }}/release/shiori.exe, assets/fonts/PlemolJP-LICENSE.txt
+          -DestinationPath Shiori-${{ matrix.target }}.zip
       - uses: actions/upload-artifact@v4
         with:
           name: Shiori-${{ matrix.target }}

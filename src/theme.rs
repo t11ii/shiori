@@ -121,6 +121,12 @@ fn style_for(p: &Palette) -> Style {
         (TextStyle::Monospace, FontId::new(12.5, Monospace)),
     ]
     .into();
+    let file_name_font = FontId::new(
+        TextStyle::Body.resolve(&s).size,
+        crate::fonts::file_name_family(cfg!(windows)),
+    );
+    s.text_styles
+        .insert(crate::fonts::file_name_style(), file_name_font);
 
     let sp = &mut s.spacing;
     sp.item_spacing = Vec2::new(8.0, 6.0);

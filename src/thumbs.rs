@@ -63,7 +63,7 @@ struct Entry {
 const MAX_PENDING: usize = 400;
 /// GPU memory kept for thumbnails before the least recently drawn ones are dropped.
 const TEXTURE_BUDGET: usize = 256 << 20;
-/// Size the disk cache is trimmed to at startup, oldest files first.
+/// Size the disk cache is trimmed to after the first frame, oldest files first.
 const DISK_BUDGET: u64 = 512 << 20;
 
 pub struct Thumbs {
@@ -74,6 +74,7 @@ pub struct Thumbs {
     frame: u64,
     requested: HashSet<Key>,
     failed: HashSet<Key>,
+    cache_to_trim: Option<PathBuf>,
 }
 
 impl Thumbs {
@@ -85,9 +86,6 @@ impl Thumbs {
         });
         // a format version in the path, so a future change starts a fresh cache
         let cache_dir = cache_dir.map(|d| d.join("v1"));
-        if let Some(dir) = cache_dir.clone() {
-            std::thread::spawn(move || trim_disk_cache(&dir, DISK_BUDGET));
-        }
         let (tx, rx) = channel();
         let workers = std::thread::available_parallelism()
             .map(|n| n.get().clamp(2, 6))
@@ -125,6 +123,13 @@ impl Thumbs {
             frame: 0,
             requested: HashSet::new(),
             failed: HashSet::new(),
+            cache_to_trim: cache_dir,
+        }
+    }
+
+    pub fn start_disk_cache_trim(&mut self) {
+        if let Some(dir) = self.cache_to_trim.take() {
+            std::thread::spawn(move || trim_disk_cache(&dir, DISK_BUDGET));
         }
     }
 

@@ -3,7 +3,7 @@
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::{FontRef, MetadataProvider};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 const CANDIDATES: &[&str] = &[
     // macOS
@@ -24,11 +24,40 @@ const CANDIDATES: &[&str] = &[
 ];
 
 pub fn install(ctx: &egui::Context) {
+    ctx.set_fonts(font_definitions(cfg!(windows)));
+}
+
+fn font_definitions(windows: bool) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     if let Some(bytes) = CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) {
-        add_japanese_font(&mut fonts, FontData::from_owned(bytes), cfg!(windows));
+        add_japanese_font(&mut fonts, FontData::from_owned(bytes), windows);
     }
-    ctx.set_fonts(fonts);
+    #[cfg(any(windows, test))]
+    if windows {
+        const PLEMOLJP: &str = "PlemolJP HS";
+        // PlemolJP v3.1.0, distributed under the SIL Open Font License.
+        let font = FontData::from_static(include_bytes!("../assets/fonts/PlemolJPHS-Regular.ttf"));
+        fonts.font_data.insert(PLEMOLJP.to_owned(), Arc::new(font));
+
+        let mut family = fonts.families[&FontFamily::Proportional].clone();
+        family.insert(0, PLEMOLJP.to_owned());
+        fonts.families.insert(file_name_family(true), family);
+    }
+    fonts
+}
+
+pub(crate) fn file_name_family(windows: bool) -> FontFamily {
+    if windows {
+        FontFamily::Name("file-names".into())
+    } else {
+        FontFamily::Proportional
+    }
+}
+
+pub(crate) fn file_name_style() -> egui::TextStyle {
+    static STYLE: LazyLock<egui::TextStyle> =
+        LazyLock::new(|| egui::TextStyle::Name("File name".into()));
+    STYLE.clone()
 }
 
 fn add_japanese_font(fonts: &mut FontDefinitions, mut font: FontData, align_baseline: bool) {
@@ -68,6 +97,45 @@ fn baseline_from_line_center(font: &FontData) -> Option<f32> {
 mod tests {
     use super::*;
     use egui::{Color32, FontId, RawInput};
+
+    #[test]
+    fn windows_file_names_use_a_two_cell_japanese_grid() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(font_definitions(true));
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut input = RawInput::default();
+            input
+                .viewports
+                .get_mut(&input.viewport_id)
+                .unwrap()
+                .native_pixels_per_point = Some(scale);
+            ctx.run_ui(input, |ui| {
+                let galley = ui.painter().layout_no_wrap(
+                    "Ai資料　v02.txt".to_owned(),
+                    FontId::new(13.5, file_name_family(true)),
+                    Color32::WHITE,
+                );
+                let glyphs = &galley.rows[0].glyphs;
+                let cell = glyphs[0].advance_width;
+                let baseline = glyphs[0].pos.y;
+                for glyph in glyphs {
+                    let expected = if glyph.chr.is_ascii() {
+                        cell
+                    } else {
+                        2.0 * cell
+                    };
+                    assert!(
+                        (glyph.advance_width - expected).abs() < 0.01,
+                        "{scale}x: {:?} advances {} points, expected {expected}",
+                        glyph.chr,
+                        glyph.advance_width
+                    );
+                    assert_eq!(glyph.pos.y, baseline, "{scale}x: {:?}", glyph.chr);
+                }
+            })
+            .drop_without_applying_deltas();
+        }
+    }
 
     #[test]
     fn mixed_filename_glyphs_share_a_baseline() {

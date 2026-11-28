@@ -1,7 +1,9 @@
 //! SQLite-backed metadata store: files, tags, stars, labels, comments and virtual folders.
 
 use anyhow::{Context as _, Result};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{
+    params, params_from_iter, Connection, OptionalExtension, Transaction, TransactionBehavior,
+};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
 use crate::query::Filter;
@@ -146,6 +148,15 @@ pub fn open_conn(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(conn)
+}
+
+/// Build the sort index from a background connection after opening the window.
+pub fn ensure_folder_name_order_index(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_files_folder_name_order
+         ON files(parent, is_dir DESC, name COLLATE NOCASE)",
+    )?;
+    Ok(())
 }
 
 fn row_to_file(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
@@ -347,7 +358,8 @@ impl Db {
         } else {
             sql.push_str(&format!(" ORDER BY {key}"));
         }
-        sql.push_str(&format!(" LIMIT {limit}"));
+        // A short startup list must have the same order as the full query.
+        sql.push_str(&format!(", f.id LIMIT {limit}"));
 
         let mut st = self.conn.prepare(&sql)?;
         let rows = st
@@ -432,6 +444,14 @@ impl Db {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn tag_names(&self) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT name FROM tags ORDER BY name COLLATE NOCASE")?;
+        let names = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        Ok(names)
     }
 
     /// All tags with the number of files carrying them.
@@ -570,19 +590,20 @@ impl Db {
 
     /// Renames a file or folder on disk and keeps its metadata (and that of its children).
     pub fn rename(&self, id: i64, new_name: &str) -> Result<String> {
-        let f = self.file(id)?.context("file not found")?;
         let new_name = new_name.trim();
         anyhow::ensure!(!new_name.is_empty(), "name is empty");
         anyhow::ensure!(
             !new_name.contains(['/', '\\']),
             "name must not contain path separators"
         );
+        // Reserve the database writer before touching the filesystem, including
+        // when a background scan is creating the folder sort index.
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let f = self.file(id)?.context("file not found")?;
         let old = PathBuf::from(&f.path);
         let new = old.with_file_name(new_name);
         anyhow::ensure!(!new.exists(), "a file with that name already exists");
-        std::fs::rename(&old, &new).with_context(|| format!("rename {}", old.display()))?;
         let new_key = path_key(&new);
-        let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE files SET path = ?, name = ?, ext = ? WHERE id = ?",
             params![new_key, new_name, ext_of(&new), id],
@@ -590,6 +611,7 @@ impl Db {
         if f.is_dir {
             move_subtree(&tx, &f.path, &new_key)?;
         }
+        std::fs::rename(&old, &new).with_context(|| format!("rename {}", old.display()))?;
         tx.commit()?;
         Ok(new_key)
     }
@@ -597,12 +619,16 @@ impl Db {
     /// Moves files to the OS trash and forgets them.
     pub fn trash(&self, ids: &[i64]) -> Result<()> {
         for id in ids {
+            // A failed SQLite write leaves the file in place; a failed trash
+            // operation rolls back the deletion of its indexed metadata.
+            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
             if let Some(f) = self.file(*id)? {
+                self.forget(&f)?;
                 if Path::new(&f.path).exists() {
                     trash::delete(&f.path).with_context(|| format!("trash {}", f.path))?;
                 }
-                self.forget(&f)?;
             }
+            tx.commit()?;
         }
         Ok(())
     }
