@@ -1389,7 +1389,7 @@ impl ShioriApp {
             .sense(Sense::click_and_drag())
             .resizable(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(34.0))
+            .column(Column::exact(24.0).resizable(false))
             .column(Column::initial(220.0).at_least(80.0).clip(true))
             .column(Column::initial(76.0).at_least(30.0).clip(true))
             .column(Column::initial(140.0).at_least(40.0).clip(true))
