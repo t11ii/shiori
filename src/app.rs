@@ -290,6 +290,20 @@ impl ShioriApp {
 
     fn refresh_sidebar(&mut self) {
         self.roots = self.db.roots().unwrap_or_default();
+        self.profiles = self
+            .db
+            .profiles()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|profile| (profile, -1))
+            .collect();
+        self.tags = self
+            .db
+            .tag_names()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|name| (name, -1))
+            .collect();
         self.sidebar_gen += 1;
         self.searcher.send_sidebar(self.sidebar_gen);
         self.sidebar_dirty = false;
@@ -301,8 +315,16 @@ impl ShioriApp {
             .latest_sidebar()
             .filter(|res| res.generation == self.sidebar_gen)
         {
-            self.profiles = res.profiles;
-            self.tags = res.tags;
+            for (profile, count) in &mut self.profiles {
+                if let Some(&n) = res.profile_counts.get(&profile.id) {
+                    *count = n;
+                }
+            }
+            for (name, count) in &mut self.tags {
+                if let Some(&n) = res.tag_counts.get(name) {
+                    *count = n;
+                }
+            }
             self.sidebar_shown_gen = res.generation;
         }
     }
@@ -919,7 +941,7 @@ impl ShioriApp {
                     let (icon, count) = if prof.query.is_some() {
                         ("🔎", None)
                     } else {
-                        ("🔖", Some(*n))
+                        ("🔖", (*n >= 0).then_some(*n))
                     };
                     let resp = theme::nav_item(ui, icon, &prof.name, count, active);
                     if resp.clicked() {
@@ -959,7 +981,7 @@ impl ShioriApp {
                 let current = Filter::parse(&self.search);
                 for (t, n) in &self.tags {
                     let active = current.tags.iter().any(|x| x.eq_ignore_ascii_case(t));
-                    let resp = theme::nav_item(ui, "#", t, Some(*n), active);
+                    let resp = theme::nav_item(ui, "#", t, (*n >= 0).then_some(*n), active);
                     // colour swatch matching the tag's chip colour
                     let dot = egui::pos2(resp.rect.left() + 16.0, resp.rect.center().y);
                     ui.painter().circle_filled(dot, 4.5, theme::tag_dot(p, t));
@@ -2847,6 +2869,26 @@ fn reveal(path: &str) {
 #[cfg(test)]
 mod startup_tests {
     use super::*;
+
+    #[test]
+    fn sidebar_identity_updates_before_counts_arrive() {
+        let data = tempfile::tempdir().unwrap();
+        let db = Db::open_in(data.path()).unwrap();
+        let old = db.create_profile("Old", None).unwrap();
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = ShioriApp::new(&cc, db, data.path().join("webview"), None);
+
+        app.refresh_sidebar();
+        assert_eq!(app.profiles.len(), 1);
+        assert_eq!(app.profiles[0].0.name, "Old");
+        app.apply(&ctx, Action::DeleteProfile(old));
+        let replacement = app.db.create_profile("Replacement", None).unwrap();
+        app.refresh_sidebar();
+        assert_eq!(app.profiles.len(), 1);
+        assert_eq!(app.profiles[0].0.id, replacement);
+        assert_eq!(app.profiles[0].0.name, "Replacement");
+    }
 
     #[test]
     fn initial_frame_shows_a_prefix_and_defers_startup_work() {

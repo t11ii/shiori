@@ -1,8 +1,9 @@
 //! Loads file lists and sidebar counts on a worker thread with its own SQLite
 //! connection. Requests of each kind are coalesced while the worker is busy.
 
-use crate::db::{Db, FileRow, Profile, Scope, SortKey};
+use crate::db::{Db, FileRow, Scope, SortKey};
 use crate::query::Filter;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Instant;
@@ -25,8 +26,8 @@ pub struct Response {
 #[derive(Default)]
 pub struct SidebarResponse {
     pub generation: u64,
-    pub profiles: Vec<(Profile, i64)>,
-    pub tags: Vec<(String, i64)>,
+    pub profile_counts: HashMap<i64, i64>,
+    pub tag_counts: HashMap<String, i64>,
 }
 
 enum Work {
@@ -114,23 +115,17 @@ impl Searcher {
 }
 
 fn load_sidebar(db: &Db, generation: u64) -> SidebarResponse {
-    let profiles = db
+    let profile_counts = db
         .profiles()
         .unwrap_or_default()
         .into_iter()
-        .map(|profile| {
-            let count = if profile.query.is_some() {
-                -1
-            } else {
-                db.profile_count(profile.id).unwrap_or(0)
-            };
-            (profile, count)
-        })
+        .filter(|profile| profile.query.is_none())
+        .map(|profile| (profile.id, db.profile_count(profile.id).unwrap_or(0)))
         .collect();
-    let tags = db.tag_counts().unwrap_or_default();
+    let tag_counts = db.tag_counts().unwrap_or_default().into_iter().collect();
     SidebarResponse {
         generation,
-        profiles,
-        tags,
+        profile_counts,
+        tag_counts,
     }
 }

@@ -234,7 +234,7 @@ fn removing_a_folder_clears_its_files_but_keeps_annotated_ones() {
 }
 
 #[test]
-fn rename_preserves_the_file_when_another_connection_holds_the_write_lock() {
+fn file_operations_leave_files_in_place_when_the_database_writer_is_busy() {
     let (_d, folder, db, _root) = setup();
     let id = id_of(&db, "report.pdf");
     let other = crate::db::open_conn(&db.path).unwrap();
@@ -246,6 +246,8 @@ fn rename_preserves_the_file_when_another_connection_holds_the_write_lock() {
     assert!(db.rename(id, "report-renamed.pdf").is_err());
     assert!(folder.path().join("report.pdf").is_file());
     assert!(!folder.path().join("report-renamed.pdf").exists());
+    assert!(db.trash(&[id]).is_err());
+    assert!(folder.path().join("report.pdf").is_file());
     assert_eq!(db.file(id).unwrap().unwrap().name, "report.pdf");
 }
 
@@ -290,7 +292,7 @@ fn searcher_answers_the_newest_file_and_sidebar_requests() {
         .map(|r| r.name)
         .collect();
     assert_eq!(names, vec!["report.pdf"]);
-    assert_eq!(sidebar.unwrap().tags, vec![("launch".to_owned(), 1)]);
+    assert_eq!(sidebar.unwrap().tag_counts.get("launch"), Some(&1));
 }
 
 #[test]

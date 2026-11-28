@@ -193,7 +193,11 @@ pub fn spawn_scan(
             };
             if i == 0 {
                 // Prepare the sort index once the first folder's scan has finished.
-                let _ = open_conn(&db_path).and_then(|conn| ensure_folder_name_order_index(&conn));
+                // If another writer is active, the next scan can try again.
+                let _ = open_conn(&db_path).and_then(|conn| {
+                    conn.busy_timeout(std::time::Duration::ZERO)?;
+                    ensure_folder_name_order_index(&conn)
+                });
             }
             let _ = tx.send(msg);
             ctx.request_repaint();

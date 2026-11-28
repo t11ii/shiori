@@ -1,7 +1,9 @@
 //! SQLite-backed metadata store: files, tags, stars, labels, comments and virtual folders.
 
 use anyhow::{Context as _, Result};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{
+    params, params_from_iter, Connection, OptionalExtension, Transaction, TransactionBehavior,
+};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
 use crate::query::Filter;
@@ -444,6 +446,14 @@ impl Db {
         Ok(())
     }
 
+    pub fn tag_names(&self) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT name FROM tags ORDER BY name COLLATE NOCASE")?;
+        let names = st.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        Ok(names)
+    }
+
     /// All tags with the number of files carrying them.
     pub fn tag_counts(&self) -> Result<Vec<(String, i64)>> {
         let mut st = self.conn.prepare(
@@ -588,10 +598,7 @@ impl Db {
         );
         // Reserve the database writer before touching the filesystem, including
         // when a background scan is creating the folder sort index.
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.conn,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let f = self.file(id)?.context("file not found")?;
         let old = PathBuf::from(&f.path);
         let new = old.with_file_name(new_name);
@@ -612,12 +619,16 @@ impl Db {
     /// Moves files to the OS trash and forgets them.
     pub fn trash(&self, ids: &[i64]) -> Result<()> {
         for id in ids {
+            // A failed SQLite write leaves the file in place; a failed trash
+            // operation rolls back the deletion of its indexed metadata.
+            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
             if let Some(f) = self.file(*id)? {
+                self.forget(&f)?;
                 if Path::new(&f.path).exists() {
                     trash::delete(&f.path).with_context(|| format!("trash {}", f.path))?;
                 }
-                self.forget(&f)?;
             }
+            tx.commit()?;
         }
         Ok(())
     }
