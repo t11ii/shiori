@@ -1,6 +1,6 @@
 [package]
 name = "shiori"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Tag-based file manager for Windows and macOS"
 
@@ -22,6 +22,7 @@ trash = "5"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1", features = ["derive"] }
+skrifa = { version = "0.44", default-features = false }
 unicode-normalization = "0.1"
 jpeg-decoder = { version = "0.3", default-features = false }
 kamadak-exif = "0.6.2"

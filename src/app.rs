@@ -1407,11 +1407,24 @@ impl ShioriApp {
                                 rgb(LABELS[f.label as usize].2),
                             );
                         }
-                        let mut t = RichText::new(&f.name).color(p.text_strong);
-                        if f.missing {
-                            t = t.strikethrough().color(p.text_weak);
+                        let color = if f.missing {
+                            p.text_weak
+                        } else {
+                            p.text_strong
+                        };
+                        let mut name = RichText::new(&f.name).color(color);
+                        if f.missing && !cfg!(windows) {
+                            name = name.strikethrough();
                         }
-                        ui.add(egui::Label::new(t).truncate().selectable(false));
+                        let label = ui.add(egui::Label::new(name).truncate().selectable(false));
+                        if f.missing && cfg!(windows) {
+                            // Keep the strike centered across glyphs with different font offsets.
+                            ui.painter().hline(
+                                label.rect.x_range(),
+                                label.rect.center().y,
+                                Stroke::new(1.0, color),
+                            );
+                        }
                     });
                     row.col(|ui| {
                         if f.star > 0 {
