@@ -3486,7 +3486,7 @@ dependencies = [
 
 [[package]]
 name = "shiori"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3504,6 +3504,7 @@ dependencies = [
  "rfd",
  "rusqlite",
  "serde",
+ "skrifa",
  "tempfile",
  "trash",
  "unicode-normalization",
