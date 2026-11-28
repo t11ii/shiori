@@ -148,6 +148,15 @@ pub fn open_conn(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Build the sort index from a background connection after opening the window.
+pub fn ensure_folder_name_order_index(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_files_folder_name_order
+         ON files(parent, is_dir DESC, name COLLATE NOCASE)",
+    )?;
+    Ok(())
+}
+
 fn row_to_file(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
     let tags: Option<String> = r.get(11)?;
     let mut tags: Vec<String> = tags
@@ -347,7 +356,8 @@ impl Db {
         } else {
             sql.push_str(&format!(" ORDER BY {key}"));
         }
-        sql.push_str(&format!(" LIMIT {limit}"));
+        // A short startup list must have the same order as the full query.
+        sql.push_str(&format!(", f.id LIMIT {limit}"));
 
         let mut st = self.conn.prepare(&sql)?;
         let rows = st
