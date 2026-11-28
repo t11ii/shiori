@@ -137,6 +137,8 @@ pub struct ShioriApp {
     startup_frame: Option<u64>,
     dirty: bool,
     sidebar_dirty: bool,
+    sidebar_gen: u64,
+    sidebar_shown_gen: u64,
     query_ms: f64,
     /// Runs list queries off the UI thread.
     searcher: Searcher,
@@ -207,6 +209,8 @@ impl ShioriApp {
             startup_frame: Some(cc.egui_ctx.cumulative_frame_nr()),
             dirty: true,
             sidebar_dirty: true,
+            sidebar_gen: 0,
+            sidebar_shown_gen: 0,
             query_ms: 0.0,
             searcher,
             query_gen: 0,
@@ -286,20 +290,21 @@ impl ShioriApp {
 
     fn refresh_sidebar(&mut self) {
         self.roots = self.db.roots().unwrap_or_default();
-        let profiles = self.db.profiles().unwrap_or_default();
-        self.profiles = profiles
-            .into_iter()
-            .map(|p| {
-                let n = if p.query.is_some() {
-                    -1
-                } else {
-                    self.db.profile_count(p.id).unwrap_or(0)
-                };
-                (p, n)
-            })
-            .collect();
-        self.tags = self.db.tag_counts().unwrap_or_default();
+        self.sidebar_gen += 1;
+        self.searcher.send_sidebar(self.sidebar_gen);
         self.sidebar_dirty = false;
+    }
+
+    fn receive_sidebar(&mut self) {
+        if let Some(res) = self
+            .searcher
+            .latest_sidebar()
+            .filter(|res| res.generation == self.sidebar_gen)
+        {
+            self.profiles = res.profiles;
+            self.tags = res.tags;
+            self.sidebar_shown_gen = res.generation;
+        }
     }
 
     /// Builds the query for the current scope/search/sort and bumps the generation.
@@ -612,6 +617,10 @@ impl ShioriApp {
             Action::SelectAll => {
                 changed = false;
                 if self.rows_partial {
+                    if !self.dirty && self.shown_gen == self.query_gen {
+                        self.dirty = true;
+                        ctx.request_repaint();
+                    }
                     self.notify("Select All is available once the full list is loaded.");
                 } else {
                     self.selected = self.rows.iter().map(|r| r.id).collect();
@@ -895,7 +904,7 @@ impl ShioriApp {
                         actions.push(Action::EditProfile(None, false));
                     }
                 });
-                if self.profiles.is_empty() && self.startup_frame.is_none() {
+                if self.profiles.is_empty() && self.sidebar_shown_gen > 0 {
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
                         ui.label(
@@ -937,7 +946,7 @@ impl ShioriApp {
                 }
 
                 theme::section(ui, "TAGS", |_| {});
-                if self.tags.is_empty() && self.startup_frame.is_none() {
+                if self.tags.is_empty() && self.sidebar_shown_gen > 0 {
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
                         ui.label(
@@ -2426,9 +2435,6 @@ impl eframe::App for ShioriApp {
         self.poll_scans();
         self.thumbs.poll(&ctx);
         self.handle_dropped_files(&ctx);
-        if self.sidebar_dirty && !first_frame {
-            self.refresh_sidebar();
-        }
         if self.dirty && !first_frame {
             // while typing, wait for a short pause before searching
             let wait = self
@@ -2441,7 +2447,11 @@ impl eframe::App for ShioriApp {
                 ctx.request_repaint_after(wait);
             }
         }
+        if self.sidebar_dirty && !first_frame {
+            self.refresh_sidebar();
+        }
         self.receive_rows();
+        self.receive_sidebar();
         if !first_frame && self.startup_frame.take().is_some() {
             self.start_scan(&ctx, self.roots.clone());
             self.thumbs.start_disk_cache_trim();
@@ -2896,10 +2906,17 @@ mod startup_tests {
         app.apply(&ctx, Action::SelectAll);
         assert_eq!(app.selected, HashSet::from([selected]));
 
+        let initial_query = app.query_gen;
+        redraw(&mut app);
+        assert!(app.query_gen > initial_query);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             redraw(&mut app);
-            if app.rows.len() == 160 && app.scanning.is_empty() && app.shown_gen == app.query_gen {
+            if app.rows.len() == 160
+                && app.scanning.is_empty()
+                && app.shown_gen == app.query_gen
+                && app.sidebar_shown_gen == app.sidebar_gen
+            {
                 break;
             }
             assert!(Instant::now() < deadline, "startup work did not finish");

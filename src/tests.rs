@@ -234,9 +234,26 @@ fn removing_a_folder_clears_its_files_but_keeps_annotated_ones() {
 }
 
 #[test]
-fn searcher_answers_the_newest_request() {
+fn rename_preserves_the_file_when_another_connection_holds_the_write_lock() {
+    let (_d, folder, db, _root) = setup();
+    let id = id_of(&db, "report.pdf");
+    let other = crate::db::open_conn(&db.path).unwrap();
+    let _writer =
+        rusqlite::Transaction::new_unchecked(&other, rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+    db.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+
+    assert!(db.rename(id, "report-renamed.pdf").is_err());
+    assert!(folder.path().join("report.pdf").is_file());
+    assert!(!folder.path().join("report-renamed.pdf").exists());
+    assert_eq!(db.file(id).unwrap().unwrap().name, "report.pdf");
+}
+
+#[test]
+fn searcher_answers_the_newest_file_and_sidebar_requests() {
     use crate::search::{Request, Searcher};
     let (_d, _files, db, _root) = setup();
+    db.add_tag(&[id_of(&db, "report.pdf")], "launch").unwrap();
     let s = Searcher::new(db.path.clone(), || {});
     for (g, q) in [(1, "beach"), (2, "mountain"), (3, "ext:pdf")] {
         s.send(Request {
@@ -247,17 +264,33 @@ fn searcher_answers_the_newest_request() {
             desc: false,
             limit: 100,
         });
+        s.send_sidebar(g);
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let res = loop {
+    let mut files = None;
+    let mut sidebar = None;
+    while files.is_none() || sidebar.is_none() {
         if let Some(r) = s.latest().filter(|r| r.generation == 3) {
-            break r;
+            files = Some(r);
+        }
+        if let Some(r) = s.latest_sidebar().filter(|r| r.generation == 3) {
+            sidebar = Some(r);
+        }
+        if files.is_some() && sidebar.is_some() {
+            break;
         }
         assert!(std::time::Instant::now() < deadline, "no answer");
         std::thread::sleep(std::time::Duration::from_millis(5));
-    };
-    let names: Vec<String> = res.rows.unwrap().into_iter().map(|r| r.name).collect();
+    }
+    let names: Vec<String> = files
+        .unwrap()
+        .rows
+        .unwrap()
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
     assert_eq!(names, vec!["report.pdf"]);
+    assert_eq!(sidebar.unwrap().tags, vec![("launch".to_owned(), 1)]);
 }
 
 #[test]

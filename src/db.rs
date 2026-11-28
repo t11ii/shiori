@@ -580,19 +580,23 @@ impl Db {
 
     /// Renames a file or folder on disk and keeps its metadata (and that of its children).
     pub fn rename(&self, id: i64, new_name: &str) -> Result<String> {
-        let f = self.file(id)?.context("file not found")?;
         let new_name = new_name.trim();
         anyhow::ensure!(!new_name.is_empty(), "name is empty");
         anyhow::ensure!(
             !new_name.contains(['/', '\\']),
             "name must not contain path separators"
         );
+        // Reserve the database writer before touching the filesystem, including
+        // when a background scan is creating the folder sort index.
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let f = self.file(id)?.context("file not found")?;
         let old = PathBuf::from(&f.path);
         let new = old.with_file_name(new_name);
         anyhow::ensure!(!new.exists(), "a file with that name already exists");
-        std::fs::rename(&old, &new).with_context(|| format!("rename {}", old.display()))?;
         let new_key = path_key(&new);
-        let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE files SET path = ?, name = ?, ext = ? WHERE id = ?",
             params![new_key, new_name, ext_of(&new), id],
@@ -600,6 +604,7 @@ impl Db {
         if f.is_dir {
             move_subtree(&tx, &f.path, &new_key)?;
         }
+        std::fs::rename(&old, &new).with_context(|| format!("rename {}", old.display()))?;
         tx.commit()?;
         Ok(new_key)
     }

@@ -179,9 +179,7 @@ pub fn spawn_scan(
     ctx: eframe::egui::Context,
 ) {
     std::thread::spawn(move || {
-        // Prepare existing databases here, before the scan opens its transaction.
-        let _ = open_conn(&db_path).and_then(|conn| ensure_folder_name_order_index(&conn));
-        for root in roots {
+        for (i, root) in roots.into_iter().enumerate() {
             let msg = match scan_root(&db_path, &root, Some(&tx)) {
                 Ok((count, removed)) => ScanMsg::Done {
                     root: root.clone(),
@@ -193,6 +191,10 @@ pub fn spawn_scan(
                     message: format!("{e:#}"),
                 },
             };
+            if i == 0 {
+                // Prepare the sort index once the first folder's scan has finished.
+                let _ = open_conn(&db_path).and_then(|conn| ensure_folder_name_order_index(&conn));
+            }
             let _ = tx.send(msg);
             ctx.request_repaint();
         }
